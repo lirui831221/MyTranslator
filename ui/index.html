@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Translator</title>
+<style>
+  :root {
+    --bg: #1c1c1e;
+    --surface: #2c2c2e;
+    --surface-2: #3a3a3c;
+    --accent: #0a84ff;
+    --text: #f5f5f7;
+    --text-2: #98989d;
+    --radius: 14px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, "SF Pro Text", "PingFang SC", sans-serif; }
+  body { background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; padding: 20px; gap: 14px; }
+
+  .titlebar { display: flex; align-items: center; justify-content: space-between; }
+  .titlebar h1 { font-size: 17px; font-weight: 600; }
+  .status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+  .quality { color: #64d2ff; font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #30d158; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; }
+  .seg { display: flex; background: var(--surface); border-radius: 10px; padding: 3px; flex: 1; }
+  .seg button { flex: 1; border: 0; background: transparent; color: var(--text-2); padding: 7px 0; border-radius: 8px; font-size: 13px; cursor: pointer; transition: all .15s; }
+  .seg button.active { background: var(--surface-2); color: var(--text); font-weight: 500; }
+  .language-control { display: flex; align-items: center; gap: 8px; background: var(--surface); border-radius: 10px; padding: 3px 8px; min-width: 215px; }
+  .language-control label { color: var(--text-2); font-size: 11px; white-space: nowrap; }
+  .language-select { min-width: 0; flex: 1; border: 0; outline: none; color: var(--text); background: var(--surface-2); border-radius: 8px; padding: 7px 9px; font-size: 13px; }
+
+  .pane { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  textarea { flex: 1; background: var(--surface); border: 1px solid transparent; border-radius: var(--radius); color: var(--text); padding: 16px; font-size: 15px; line-height: 1.6; resize: none; outline: none; transition: border-color .15s; }
+  textarea:focus { border-color: var(--accent); }
+  textarea::placeholder { color: var(--text-2); }
+
+  .result { flex: 1; background: var(--surface); border-radius: var(--radius); padding: 16px; font-size: 15px; line-height: 1.6; overflow-y: auto; white-space: pre-wrap; position: relative; }
+  .result .meta { font-size: 11px; color: var(--text-2); position: absolute; bottom: 10px; right: 14px; }
+  .result .placeholder { color: var(--text-2); }
+
+  .btn { background: var(--accent); color: white; border: 0; border-radius: 12px; padding: 13px; font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity .15s; }
+  .btn:hover { opacity: 0.88; }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+  .btn.swap { background: var(--surface-2); flex: 0 0 52px; font-size: 17px; }
+  .voice-bar { display: flex; align-items: center; gap: 12px; }
+  .btn.mic { flex: 0 0 180px; background: var(--surface-2); font-size: 13px; padding: 9px; }
+  .btn.mic.on { background: #ff453a; }
+  .hint { font-size: 11px; color: var(--text-2); }
+  .live { background: var(--surface); border-radius: var(--radius); padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .history-head { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-2); padding-bottom: 6px; border-bottom: 1px solid var(--surface-2); }
+  .clear-btn { background: transparent; border: 0; color: var(--text-2); font-size: 11px; cursor: pointer; padding: 2px 6px; border-radius: 5px; }
+  .clear-btn:hover { background: var(--surface-2); color: var(--text); }
+  .column-heads { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 3px 0 0; }
+  .column-title { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 11px; font-weight: 600; letter-spacing: .04em; }
+  .column-title::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #64d2ff; }
+  .column-title.translation::before { background: #30d158; }
+  .history { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 2px; }
+  .entry { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .entry .src, .entry .dst { min-width: 0; padding: 12px 13px; border-radius: 10px; border: 1px solid var(--surface-2); line-height: 1.55; overflow-wrap: anywhere; }
+  .entry .src { background: #242426; font-size: calc(var(--src-size, 12px)); color: #d1d1d6; }
+  .entry .dst { background: #202b25; border-color: #30483a; font-size: calc(var(--dst-size, 15px)); font-weight: 500; color: var(--text); }
+  .entry.pending .dst, .entry.partial .dst { color: var(--text-2); font-weight: 400; font-style: italic; }
+  .entry.partial .src { color: var(--text-2); border-style: dashed; }
+  .entry.error .src, .entry.error .dst { border-color: #ff453a; color: #ff6961; }
+  .font-ctl { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); }
+  .font-ctl button { background: var(--surface-2); color: var(--text); border: 0; border-radius: 6px; width: 24px; height: 20px; font-size: 11px; cursor: pointer; }
+  .font-ctl button:hover { opacity: 0.8; }
+  dialog.glossary-dialog { width: min(720px, calc(100vw - 48px)); max-height: calc(100vh - 48px); margin: auto; background: var(--bg); color: var(--text); border: 1px solid var(--surface-2); border-radius: 16px; padding: 0; box-shadow: 0 24px 80px rgba(0,0,0,.55); }
+  dialog.glossary-dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(3px); }
+  .glossary-head, .glossary-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; }
+  .glossary-head { border-bottom: 1px solid var(--surface-2); }
+  .glossary-foot { border-top: 1px solid var(--surface-2); }
+  .glossary-body { padding: 12px 18px; overflow-y: auto; max-height: calc(100vh - 220px); }
+  .glossary-note { color: var(--text-2); font-size: 12px; line-height: 1.5; margin-bottom: 10px; }
+  .glossary-labels, .glossary-row { display: grid; grid-template-columns: 34px 42px 1fr 1fr 34px; gap: 8px; align-items: center; }
+  .glossary-labels { color: var(--text-2); font-size: 11px; padding: 0 0 6px; }
+  .glossary-row { margin-bottom: 8px; }
+  .term-input { width: 100%; background: var(--surface); border: 1px solid var(--surface-2); border-radius: 8px; color: var(--text); padding: 9px 10px; outline: none; }
+  .term-input:focus { border-color: var(--accent); }
+  .icon-btn { border: 0; background: var(--surface-2); color: var(--text-2); border-radius: 7px; width: 30px; height: 30px; cursor: pointer; }
+  .secondary-btn { background: var(--surface-2); color: var(--text); border: 0; border-radius: 9px; padding: 9px 14px; cursor: pointer; }
+  .save-btn { background: var(--accent); color: white; border: 0; border-radius: 9px; padding: 9px 16px; font-weight: 600; cursor: pointer; }
+  .glossary-status { color: var(--text-2); font-size: 12px; flex: 1; }
+  @media (max-width: 680px) {
+    .column-heads { display: none; }
+    .entry { grid-template-columns: 1fr; gap: 6px; }
+    .entry .src::before, .entry .dst::before { display: block; margin-bottom: 4px; color: var(--text-2); font-size: 10px; font-style: normal; font-weight: 600; letter-spacing: .04em; }
+    .entry .src::before { content: '识别原文'; }
+    .entry .dst::before { content: '翻译结果'; }
+  }
+</style>
+</head>
+<body>
+  <div class="titlebar">
+    <h1>My Translator <span style="color:#30d158;font-size:11px">v3</span></h1>
+    <div class="status"><div class="dot" id="dot"></div><span class="quality" id="qualityText"></span><span id="statusText">本地引擎</span></div>
+  </div>
+
+  <div class="controls">
+    <div class="language-control">
+      <label for="asrLanguageSelect">识别语言</label>
+      <select class="language-select" id="asrLanguageSelect" title="选择输入音频的语言"></select>
+    </div>
+    <div class="language-control">
+      <label for="targetLanguageSelect">翻译为</label>
+      <select class="language-select" id="targetLanguageSelect" title="选择译文语言"></select>
+    </div>
+    <div class="seg" id="qualityProfileSeg" style="flex:1.2">
+      <button data-profile="fast" title="Whisper Medium＋Hy-MT2＋快断句，不启动可选后台复核">⚡ 极速</button>
+      <button data-profile="balanced" class="active" title="Qwen3-ASR＋Hy-MT2＋快断句，只复核数字、否定、遗漏和术语异常">⚖️ 均衡</button>
+      <button data-profile="quality" title="Qwen3-ASR＋Hy-MT2＋稳断句，Qwen3.5 选择性上下文复核">🎯 高质量</button>
+    </div>
+    <div class="seg" id="inputSeg" style="flex:0 0 190px">
+      <button data-input="microphone" class="active" title="使用麦克风和环境声音">🎙 麦克风</button>
+      <button data-input="system" title="直接捕获视频、会议和播放器声音">🔊 系统音频</button>
+    </div>
+  </div>
+
+  <div class="voice-bar">
+    <button class="btn mic" id="micBtn" onclick="toggleVoice()">🎙 开始语音翻译</button>
+    <button class="btn mic" id="overlayBtn" onclick="toggleOverlay()">🖼 悬浮字幕</button>
+    <button class="btn mic" id="speakBtn" onclick="toggleSpeak()" title="译文自动朗读（口译模式）">🔊 朗读</button>
+    <button class="btn mic" id="glossaryBtn" onclick="openGlossary()" style="flex-basis:110px" title="固定人名、机构名和技术术语的译法">📖 术语表</button>
+    <div class="hint" id="voiceHint">对麦克风说话，候选停顿后会保留约 0.12 秒尾音再翻译</div>
+  </div>
+
+  <div class="live" id="livePane" style="display:none;flex-direction:column">
+    <div class="history-head">
+      <span>实时字幕 · 左右双栏</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="font-ctl" title="识别原文（灰字）字号">
+          <span>原文</span><button onclick="srcSmaller()">−</button><button onclick="srcBigger()">＋</button>
+        </div>
+        <div class="font-ctl" title="译文（白字）字号">
+          <span>译文</span><button onclick="dstSmaller()">−</button><button onclick="dstBigger()">＋</button>
+        </div>
+        <button class="clear-btn" onclick="clearHistory()">清空</button>
+      </div>
+    </div>
+    <div class="column-heads" aria-hidden="true">
+      <div class="column-title">识别原文</div>
+      <div class="column-title translation">翻译结果</div>
+    </div>
+    <div class="history" id="historyList"></div>
+  </div>
+
+  <div class="pane" id="textPane">
+    <textarea id="input" placeholder="输入要翻译的文本，⌘+Enter 翻译"></textarea>
+    <button class="btn" id="goBtn" onclick="doTranslate()">翻译</button>
+    <div class="result" id="output"><span class="placeholder">译文将显示在这里</span></div>
+  </div>
+
+  <dialog class="glossary-dialog" id="glossaryDialog">
+    <div class="glossary-head">
+      <div>
+        <div style="font-size:16px;font-weight:600">双向术语表</div>
+        <div style="font-size:11px;color:var(--text-2);margin-top:3px">中译英和英译中自动互换</div>
+      </div>
+      <button class="icon-btn" onclick="closeGlossary()" aria-label="关闭">✕</button>
+    </div>
+    <div class="glossary-body">
+      <div class="glossary-note">“译法”控制固定翻译；“热词”会在识别前强提示 Whisper，只勾选当前内容确实会出现的人名、产品名或型号。普通术语在最近两句出现后也会短期自动升温。</div>
+      <div class="glossary-labels"><span>译法</span><span>热词</span><span>中文</span><span>英文 / 固定写法</span><span></span></div>
+      <div id="glossaryRows"></div>
+      <button class="secondary-btn" onclick="addGlossaryRow()">＋ 添加术语</button>
+    </div>
+    <div class="glossary-foot">
+      <span class="glossary-status" id="glossaryStatus"></span>
+      <button class="secondary-btn" onclick="closeGlossary()">取消</button>
+      <button class="save-btn" id="saveGlossaryBtn" onclick="saveGlossary()">保存</button>
+    </div>
+  </dialog>
+
+<script>
+  const { invoke } = window.__TAURI__.core;
+  let direction = 'auto';
+  let model = 'hy-mt2';
+  let asrModel = 'qwen3-asr';
+  let effectiveAsrModel = 'qwen3-asr';
+  let asrLanguage = 'zh';
+  let targetLanguage = 'auto';
+  let qualityProfile = 'balanced';
+  let inputMode = 'microphone';
+  let preferredInputMode = 'microphone';
+  let inputFallbackReason = '';
+  let displayedFallbackReason = '';
+  let vadMode = 'fast';
+  let busy = false;
+
+  // probe: prove the frontend JS actually executed
+  invoke('frontend_probe').catch(() => {});
+
+  async function loadLanguageOptions() {
+    const options = await invoke('language_options');
+    const recognitionSelect = document.getElementById('asrLanguageSelect');
+    const targetSelect = document.getElementById('targetLanguageSelect');
+    recognitionSelect.replaceChildren();
+    const automatic = document.createElement('option');
+    automatic.value = 'auto';
+    automatic.textContent = '自动检测（Whisper / Qwen）';
+    recognitionSelect.appendChild(automatic);
+    const qwenGroup = document.createElement('optgroup');
+    qwenGroup.label = 'Qwen3-ASR＋Whisper（30 种）';
+    const whisperGroup = document.createElement('optgroup');
+    whisperGroup.label = 'Whisper（其余 70 种）';
+    options.recognition.forEach(language => {
+      const item = document.createElement('option');
+      item.value = language.code;
+      item.textContent = `${language.zh_name} · ${language.english_name}`;
+      (language.qwen_asr ? qwenGroup : whisperGroup).appendChild(item);
+    });
+    recognitionSelect.append(qwenGroup, whisperGroup);
+    targetSelect.replaceChildren();
+    const autoTarget = document.createElement('option');
+    autoTarget.value = 'auto';
+    autoTarget.textContent = '中英互译（自动）';
+    targetSelect.appendChild(autoTarget);
+    options.translation.forEach(language => {
+      const item = document.createElement('option');
+      item.value = language.code;
+      item.textContent = `${language.zh_name} · ${language.english_name}`;
+      targetSelect.appendChild(item);
+    });
+    recognitionSelect.value = asrLanguage;
+    targetSelect.value = targetLanguage;
+  }
+  document.getElementById('asrLanguageSelect').onchange = async event => {
+    const previous = asrLanguage;
+    asrLanguage = event.target.value;
+    try {
+      await invoke('set_asr_lang', { lang: asrLanguage });
+      updateVoiceHint();
+    } catch (error) {
+      asrLanguage = previous;
+      event.target.value = previous;
+      addHistory('切换识别语言失败', String(error), 'error');
+    }
+  };
+  document.getElementById('targetLanguageSelect').onchange = async event => {
+    const previous = targetLanguage;
+    targetLanguage = event.target.value;
+    direction = targetLanguage === 'auto' ? 'auto' : `to:${targetLanguage}`;
+    try {
+      await invoke('set_target_language', { lang: targetLanguage });
+      updateVoiceHint();
+    } catch (error) {
+      targetLanguage = previous;
+      direction = previous === 'auto' ? 'auto' : `to:${previous}`;
+      event.target.value = previous;
+      addHistory('切换翻译语言失败', String(error), 'error');
+    }
+  };
+  document.querySelectorAll('#qualityProfileSeg button').forEach(b => {
+    b.onclick = async () => {
+      const previous = qualityProfile;
+      try {
+        const result = await invoke('set_quality_profile', { profile: b.dataset.profile });
+        qualityProfile = result.profile;
+        model = result.translation_model;
+        asrModel = result.recognition_model;
+        vadMode = result.vad_mode;
+        document.querySelectorAll('#qualityProfileSeg button').forEach(button =>
+          button.classList.toggle('active', button.dataset.profile === qualityProfile));
+        updateVoiceHint();
+      } catch (e) {
+        qualityProfile = previous;
+        addHistory('切换质量档位失败', String(e), 'error');
+      }
+    };
+  });
+  document.querySelectorAll('#inputSeg button').forEach(b => {
+    b.onclick = () => switchVoiceInput(b.dataset.input);
+  });
+  document.getElementById('input').addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') doTranslate();
+  });
+
+  async function doTranslate() {
+    const input = document.getElementById('input');
+    const output = document.getElementById('output');
+    const btn = document.getElementById('goBtn');
+    const text = input.value.trim();
+    if (!text || busy) return;
+    busy = true; btn.disabled = true; btn.textContent = '翻译中…';
+    try {
+      const r = await invoke('translate', { text, direction, model });
+      const speed = r.tokens_per_second > 0 ? ` · ${r.tokens_per_second} tok/s` : '';
+      output.innerHTML = escapeHtml(r.translation) +
+        `<div class="meta">${r.elapsed_ms}ms${speed} · ${escapeHtml(r.engine || model)}</div>`;
+    } catch (err) {
+      output.innerHTML = `<span class="placeholder" style="color:#ff6961">${escapeHtml(String(err))}</span>`;
+    } finally {
+      busy = false; btn.disabled = false; btn.textContent = '翻译';
+    }
+  }
+
+  async function refreshStatus() {
+    try {
+      const s = await invoke('server_status');
+      document.getElementById('statusText').textContent =
+        s.healthy ? (s.model ? '引擎已就绪' : '本地引擎') : '本地引擎';
+    } catch {}
+    setTimeout(refreshStatus, 5000);
+  }
+  refreshStatus();
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function eventPayload(event) {
+    if (!event || typeof event !== 'object') return event;
+    if ('payload' in event) return event.payload;
+    if ('data' in event) return event.data;
+    return event;
+  }
+
+  // ---------- Bidirectional glossary ----------
+  function glossaryRow(entry = { zh: '', en: '', enabled: true, asr_hotword: true }) {
+    const row = document.createElement('div');
+    row.className = 'glossary-row';
+    const enabled = document.createElement('input');
+    enabled.type = 'checkbox'; enabled.className = 'term-enabled'; enabled.checked = entry.enabled !== false;
+    enabled.title = '固定译法';
+    const hotword = document.createElement('input');
+    hotword.type = 'checkbox'; hotword.className = 'term-hotword'; hotword.checked = entry.asr_hotword === true;
+    hotword.title = 'ASR 强提示（只勾选当前内容相关术语）';
+    const zh = document.createElement('input');
+    zh.className = 'term-input term-zh'; zh.placeholder = '例如：栗战书'; zh.value = entry.zh || '';
+    const en = document.createElement('input');
+    en.className = 'term-input term-en'; en.placeholder = '例如：Li Zhanshu'; en.value = entry.en || '';
+    const remove = document.createElement('button');
+    remove.className = 'icon-btn'; remove.textContent = '−'; remove.title = '删除';
+    remove.onclick = () => row.remove();
+    row.append(enabled, hotword, zh, en, remove);
+    return row;
+  }
+  function addGlossaryRow(entry) {
+    const rows = document.getElementById('glossaryRows');
+    const row = glossaryRow(entry);
+    rows.appendChild(row);
+    if (!entry) row.querySelector('.term-zh').focus();
+  }
+  async function openGlossary() {
+    const dialog = document.getElementById('glossaryDialog');
+    const rows = document.getElementById('glossaryRows');
+    const status = document.getElementById('glossaryStatus');
+    rows.innerHTML = ''; status.textContent = '正在读取…';
+    dialog.showModal();
+    try {
+      const entries = await invoke('get_glossary');
+      entries.forEach(addGlossaryRow);
+      if (!entries.length) addGlossaryRow();
+      status.textContent = `已载入 ${entries.length} 条`;
+    } catch (error) {
+      status.textContent = String(error);
+    }
+  }
+  function closeGlossary() {
+    document.getElementById('glossaryDialog').close();
+  }
+  async function saveGlossary() {
+    const status = document.getElementById('glossaryStatus');
+    const button = document.getElementById('saveGlossaryBtn');
+    const entries = [...document.querySelectorAll('.glossary-row')].map(row => ({
+      zh: row.querySelector('.term-zh').value.trim(),
+      en: row.querySelector('.term-en').value.trim(),
+      enabled: row.querySelector('.term-enabled').checked,
+      asr_hotword: row.querySelector('.term-hotword').checked,
+    })).filter(entry => entry.zh || entry.en);
+    if (entries.some(entry => !entry.zh || !entry.en)) {
+      status.textContent = '每一行都需要同时填写中文和英文';
+      return;
+    }
+    button.disabled = true; status.textContent = '正在保存…';
+    try {
+      await invoke('save_glossary', { entries });
+      status.textContent = `已保存 ${entries.length} 条，下一句起生效`;
+      setTimeout(closeGlossary, 650);
+    } catch (error) {
+      status.textContent = String(error);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  // ---------- Voice mode ----------
+  let voiceOn = false;
+  let switchingInput = false;
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  function updateVoiceHint() {
+    if (preferredInputMode === 'system' && inputMode === 'microphone' && inputFallbackReason) {
+      document.getElementById('voiceHint').textContent =
+        `系统音频不可用，已回退麦克风：${inputFallbackReason}`;
+      return;
+    }
+    const source = inputMode === 'system'
+      ? '直接识别正在播放的视频或会议声音'
+      : '对麦克风说话';
+    const ending = vadMode === 'fast'
+      ? '，候选停顿约 0.32/0.42 秒，保留尾音后约 0.44/0.54 秒收句'
+      : '，明确句间停顿约 0.48 秒、模糊停顿最多 0.8 秒后翻译';
+    const asrLabel = document.getElementById('asrLanguageSelect').selectedOptions[0]?.textContent || asrLanguage;
+    const targetLabel = document.getElementById('targetLanguageSelect').selectedOptions[0]?.textContent || targetLanguage;
+    const recognition = effectiveAsrModel === 'qwen3-asr'
+      ? `；${asrLabel}，Qwen3-ASR 最终识别，Whisper 实时预览`
+      : `；${asrLabel}，Whisper Medium 最终识别`;
+    const profileName = qualityProfile === 'fast' ? '极速'
+      : (qualityProfile === 'quality' ? '高质量' : '均衡');
+    const review = qualityProfile === 'fast'
+      ? '；Hy-MT2 直接首译'
+      : '；Hy-MT2 首译，Qwen3.5 按需后台复核';
+    document.getElementById('voiceHint').textContent =
+      `${profileName}模式：` + source + ending + recognition + `；翻译为 ${targetLabel}` + review;
+  }
+  function setVoiceButtonState(on) {
+    const btn = document.getElementById('micBtn');
+    voiceOn = on;
+    btn.classList.toggle('on', on);
+    btn.textContent = on ? '⏹ 停止语音翻译' : '🎙 开始语音翻译';
+  }
+  async function toggleVoice() {
+    const live = document.getElementById('livePane');
+    const textPane = document.getElementById('textPane');
+    try {
+      if (!voiceOn) {
+        await invoke('start_voice', { direction, model });
+        setVoiceButtonState(true);
+        live.style.display = 'flex'; textPane.style.display = 'none';
+      } else {
+        await invoke('stop_voice');
+        setVoiceButtonState(false);
+        live.style.display = 'none'; textPane.style.display = 'flex';
+      }
+    } catch (error) {
+      addHistory('音频输入', String(error), 'error');
+    }
+  }
+  async function switchVoiceInput(nextMode) {
+    if (switchingInput || (nextMode === inputMode && nextMode === preferredInputMode)) return;
+    switchingInput = true;
+    const buttons = [...document.querySelectorAll('#inputSeg button')];
+    buttons.forEach(button => button.disabled = true);
+    const wasRunning = voiceOn;
+    try {
+      if (wasRunning) {
+        await invoke('stop_voice');
+        setVoiceButtonState(false);
+        let stopped = false;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const status = await invoke('voice_status');
+          if (!status.capture_active) { stopped = true; break; }
+          await delay(100);
+        }
+        if (!stopped) throw new Error('旧音频输入未能及时停止，请稍后重试');
+      }
+      await invoke('set_voice_input', { mode: nextMode });
+      inputMode = nextMode;
+      preferredInputMode = nextMode;
+      inputFallbackReason = '';
+      displayedFallbackReason = '';
+      buttons.forEach(button => button.classList.toggle('active', button.dataset.input === inputMode));
+      updateVoiceHint();
+      if (wasRunning) {
+        await invoke('start_voice', { direction, model });
+        setVoiceButtonState(true);
+        showLive();
+      }
+    } catch (error) {
+      addHistory('切换音频输入失败', String(error), 'error');
+      if (wasRunning && !voiceOn) {
+        try {
+          await invoke('start_voice', { direction, model });
+          setVoiceButtonState(true);
+          showLive();
+        } catch (restartError) {
+          addHistory('恢复音频输入失败', String(restartError), 'error');
+        }
+      }
+    } finally {
+      buttons.forEach(button => button.disabled = false);
+      switchingInput = false;
+    }
+  }
+  const { listen } = window.__TAURI__.event;
+
+  // ---------- History log ----------
+  function showLive() {
+    document.getElementById('livePane').style.display = 'flex';
+    document.getElementById('textPane').style.display = 'none';
+  }
+  function addHistory(source, translation, state = '', fragmentId = null) {
+    const list = document.getElementById('historyList');
+    const div = document.createElement('div');
+    div.className = 'entry' + (state ? ` ${state}` : '');
+    if (fragmentId !== null && fragmentId !== undefined) {
+      div.dataset.fragmentId = String(fragmentId);
+      div.dataset.fragmentIds = String(fragmentId);
+    }
+    div.dataset.revision = '0';
+    const src = document.createElement('div');
+    src.className = 'src';
+    src.textContent = source;
+    const dst = document.createElement('div');
+    dst.className = 'dst';
+    dst.textContent = translation;
+    div.appendChild(src); div.appendChild(dst);
+    list.prepend(div);
+    // keep the log bounded
+    while (list.children.length > 200) list.lastElementChild.remove();
+    return div;
+  }
+  function removePartialEntry() {
+    document.querySelector('#historyList .entry.partial')?.remove();
+  }
+  function updatePartialEntry(source) {
+    const list = document.getElementById('historyList');
+    let entry = list.querySelector('.entry.partial');
+    if (!entry) entry = addHistory('', '等待完整识别…', 'partial');
+    entry.querySelector('.src').textContent = source;
+    if (entry !== list.firstElementChild) list.prepend(entry);
+  }
+  function entryFragmentIds(entry) {
+    return (entry?.dataset.fragmentIds || entry?.dataset.fragmentId || '')
+      .split(',').filter(Boolean);
+  }
+  function findEntryByFragments(fragmentIds = [], pendingOnly = false) {
+    const ids = new Set(fragmentIds.map(String));
+    if (!ids.size) return null;
+    const selector = pendingOnly ? '#historyList .entry.pending' : '#historyList .entry';
+    return [...document.querySelectorAll(selector)]
+      .find(item => entryFragmentIds(item).some(id => ids.has(id))) || null;
+  }
+  function mergePendingEntries(source, fragmentIds = [], batchId = 0, revision = 0) {
+    const ids = fragmentIds.map(String);
+    if (!ids.length) return null;
+    const entries = [...document.querySelectorAll('#historyList .entry.pending')];
+    const matched = entries.filter(item => entryFragmentIds(item).some(id => ids.includes(id)));
+    if (!matched.length) return null;
+    const targetId = ids[ids.length - 1];
+    const target = matched.find(item => entryFragmentIds(item).includes(targetId)) || matched[0];
+    target.querySelector('.src').textContent = source;
+    target.dataset.semanticSource = source;
+    target.dataset.fragmentIds = ids.join(',');
+    target.dataset.batchId = String(batchId || 0);
+    target.dataset.revision = String(revision || 0);
+    matched.forEach(item => { if (item !== target) item.remove(); });
+    return target;
+  }
+  function cancelPendingEntries(fragmentIds = []) {
+    const ids = fragmentIds.map(String);
+    document.querySelectorAll('#historyList .entry.pending').forEach(item => {
+      if (entryFragmentIds(item).some(id => ids.includes(id))) item.remove();
+    });
+  }
+  function finishPendingEntry(source, translation, fragmentIds = [], batchId = 0, revision = 0) {
+    const entry = findEntryByFragments(fragmentIds)
+      || [...document.querySelectorAll('#historyList .entry.pending')]
+        .find(item => item.querySelector('.src')?.textContent === source);
+    if (!entry) {
+      const added = addHistory(source, translation);
+      added.dataset.fragmentIds = fragmentIds.map(String).join(',');
+      added.dataset.batchId = String(batchId || 0);
+      added.dataset.revision = String(revision || 0);
+      return;
+    }
+    const currentRevision = Number(entry.dataset.revision || 0);
+    if (Number(revision || 0) < currentRevision) return;
+    entry.querySelector('.src').textContent = source;
+    entry.querySelector('.dst').textContent = translation;
+    entry.classList.remove('pending');
+    entry.dataset.fragmentIds = fragmentIds.map(String).join(',') || entry.dataset.fragmentIds;
+    entry.dataset.batchId = String(batchId || entry.dataset.batchId || 0);
+    entry.dataset.revision = String(revision || 0);
+  }
+  function reviseHistoryEntry(source, fragmentIds = [], batchId = 0, revision = 1) {
+    const entry = findEntryByFragments(fragmentIds);
+    if (!entry) return;
+    const currentRevision = Number(entry.dataset.revision || 0);
+    if (Number(revision || 0) <= currentRevision) return;
+    entry.querySelector('.src').textContent = source;
+    entry.querySelector('.dst').textContent = '高精度修正翻译中…';
+    entry.classList.add('pending');
+    entry.dataset.fragmentIds = fragmentIds.map(String).join(',') || entry.dataset.fragmentIds;
+    entry.dataset.batchId = String(batchId || entry.dataset.batchId || 0);
+    entry.dataset.revision = String(revision || 1);
+  }
+  function clearHistory() {
+    document.getElementById('historyList').innerHTML = '';
+  }
+
+  // ---------- Font size controls (persisted) ----------
+  let srcSize = parseInt(localStorage.getItem('myt-src-size') || '12', 10);
+  let dstSize = parseInt(localStorage.getItem('myt-dst-size') || '15', 10);
+  function applyFontSizes() {
+    document.documentElement.style.setProperty('--src-size', srcSize + 'px');
+    document.documentElement.style.setProperty('--dst-size', dstSize + 'px');
+    localStorage.setItem('myt-src-size', srcSize);
+    localStorage.setItem('myt-dst-size', dstSize);
+  }
+  function srcBigger() { srcSize = Math.min(srcSize + 1, 28); applyFontSizes(); }
+  function srcSmaller() { srcSize = Math.max(srcSize - 1, 9); applyFontSizes(); }
+  function dstBigger() { dstSize = Math.min(dstSize + 2, 40); applyFontSizes(); }
+  function dstSmaller() { dstSize = Math.max(dstSize - 2, 11); applyFontSizes(); }
+  applyFontSizes();
+
+  listen('voice-heard', e => {
+    showLive();
+    const payload = eventPayload(e) ?? {};
+    const text = typeof payload === 'string' ? payload : (payload.source ?? '');
+    const fragmentId = typeof payload === 'string' ? null : payload.id;
+    removePartialEntry();
+    addHistory(text, '翻译中…', 'pending', fragmentId);
+  });
+  // streaming preview while speaking (top entry, grey, replaced on final)
+  listen('voice-partial', e => {
+    showLive();
+    const text = eventPayload(e) ?? '';
+    if (text) updatePartialEntry(text + ' …');
+    else removePartialEntry();
+  });
+  listen('voice-semantic-merged', e => {
+    showLive();
+    const p = eventPayload(e) ?? {};
+    mergePendingEntries(
+      p.source ?? '', p.fragment_ids ?? [], p.batch_id ?? 0, p.revision ?? 0);
+  });
+  listen('voice-asr-revised', e => {
+    showLive();
+    const p = eventPayload(e) ?? {};
+    reviseHistoryEntry(
+      p.source ?? '', p.fragment_ids ?? [], p.batch_id ?? 0, p.revision ?? 1);
+  });
+  listen('voice-semantic-cancelled', e => {
+    const p = eventPayload(e) ?? {};
+    cancelPendingEntries(p.fragment_ids ?? []);
+  });
+  listen('voice-translated', e => {
+    showLive();
+    const p = eventPayload(e) ?? {};
+    finishPendingEntry(
+      p.source ?? '', p.translation ?? '', p.fragment_ids ?? [],
+      p.batch_id ?? p.sequence ?? 0, p.revision ?? 0);
+  });
+  listen('voice-error', e => {
+    const p = eventPayload(e);
+    addHistory('错误', p ?? '', 'error');
+  });
+  listen('voice-input-fallback', e => {
+    const p = eventPayload(e) ?? {};
+    inputMode = p.effective || 'microphone';
+    preferredInputMode = p.requested || 'system';
+    inputFallbackReason = p.reason || 'ScreenCaptureKit 未能启动';
+    document.querySelectorAll('#inputSeg button').forEach(button =>
+      button.classList.toggle('active', button.dataset.input === inputMode));
+    updateVoiceHint();
+    document.getElementById('statusText').textContent = '系统音频零信号，已自动回退麦克风';
+    document.getElementById('dot').style.background = '#ff9f0a';
+    if (displayedFallbackReason !== inputFallbackReason) {
+      displayedFallbackReason = inputFallbackReason;
+      addHistory('系统音频不可用，已切换麦克风', inputFallbackReason, 'error');
+    }
+  });
+  // when the page (re)loads, sync UI with whatever the backend is doing.
+  // Poll every 2s — robust against any startup-order race.
+  async function syncVoiceUI() {
+    try {
+      const s = await invoke('voice_status');
+      if (s && s.translation_model) {
+        model = s.translation_model;
+      }
+      if (s && s.recognition_model) {
+        asrModel = s.recognition_model;
+      }
+      if (s && s.effective_recognition_model) {
+        effectiveAsrModel = s.effective_recognition_model;
+      }
+      if (s && s.asr_language) {
+        asrLanguage = s.asr_language;
+        const select = document.getElementById('asrLanguageSelect');
+        if ([...select.options].some(option => option.value === asrLanguage)) select.value = asrLanguage;
+      }
+      if (s && s.target_language) {
+        targetLanguage = s.target_language;
+        direction = s.direction || (targetLanguage === 'auto' ? 'auto' : `to:${targetLanguage}`);
+        const select = document.getElementById('targetLanguageSelect');
+        if ([...select.options].some(option => option.value === targetLanguage)) select.value = targetLanguage;
+      }
+      if (s && s.quality_profile) {
+        qualityProfile = s.quality_profile;
+        document.querySelectorAll('#qualityProfileSeg button').forEach(button =>
+          button.classList.toggle('active', button.dataset.profile === qualityProfile));
+      }
+      if (s && s.input_mode) {
+        inputMode = s.input_mode;
+        preferredInputMode = s.preferred_input_mode || inputMode;
+        inputFallbackReason = s.input_fallback_reason || '';
+        document.querySelectorAll('#inputSeg button').forEach(button =>
+          button.classList.toggle('active', button.dataset.input === inputMode));
+        if (inputFallbackReason && displayedFallbackReason !== inputFallbackReason) {
+          displayedFallbackReason = inputFallbackReason;
+          addHistory('系统音频不可用，已切换麦克风', inputFallbackReason, 'error');
+        }
+      }
+      if (s && s.vad_mode) {
+        vadMode = s.vad_mode;
+      }
+      updateVoiceHint();
+      if (s && s.quality_metrics) {
+        const q = s.quality_metrics;
+        const parts = [];
+        if (q.asr_ewma_ms !== null) parts.push(`识别 ${q.asr_ewma_ms}ms`);
+        if (q.translation_ewma_ms !== null) parts.push(`翻译 ${q.translation_ewma_ms}ms`);
+        document.getElementById('qualityText').textContent = parts.join(' · ');
+        const review = q.asr_review_ewma_ms === null ? '尚未触发' : `${q.asr_review_ewma_ms}ms`;
+        const qwen = s.effective_recognition_model === 'qwen3-asr'
+          ? 'Qwen3-ASR 最终识别已启用'
+          : (s.asr_qwen_review_available
+            ? `Qwen复核 ${s.asr_qwen_review_success_count || 0}/${s.asr_qwen_review_count || 0}，回退 ${s.asr_qwen_review_fallback_count || 0}`
+            : 'Qwen复核不可用');
+        document.getElementById('qualityText').title =
+          `二次识别 ${review} · ${qwen} · 换人断句 ${s.speaker_change_count || 0}次 · 最近异常率 ${Math.round((q.recent_issue_rate || 0) * 100)}% · 自动尾音补偿 ${q.adaptive_vad_extension_ms || 0}ms · ASR队列峰值 ${q.asr_queue_peak || 0} · 翻译队列峰值 ${q.translation_queue_peak || 0}`;
+      }
+      if (s && s.running && !voiceOn && !switchingInput) {
+        setVoiceButtonState(true);
+        document.getElementById('livePane').style.display = 'flex';
+        document.getElementById('textPane').style.display = 'none';
+      } else if (s && !s.running && voiceOn && !switchingInput) {
+        setVoiceButtonState(false);
+      }
+      // fetch the latest subtitle as a fallback when events are missed
+      const sub = await invoke('get_last_subtitle');
+      if (sub && sub.source) {
+        const list = document.getElementById('historyList');
+        const exists = [...list.querySelectorAll('.entry:not(.partial)')].some(entry =>
+          entry.querySelector('.src')?.textContent === sub.source &&
+          entry.querySelector('.dst')?.textContent === (sub.translation || '')
+        );
+        if (!exists && sub.translation) {
+          finishPendingEntry(sub.source, sub.translation);
+        }
+      }
+    } catch (e) {
+      console.error('voice_status failed:', e);
+    }
+  }
+  loadLanguageOptions().then(syncVoiceUI).catch(error => {
+    console.error('language_options failed:', error);
+    syncVoiceUI();
+  });
+  setInterval(syncVoiceUI, 2000);
+
+  // ---------- Overlay window ----------
+  let overlayOn = false;
+  // ---------- Interpreter mode (read translations aloud) ----------
+  async function toggleSpeak() {
+    try {
+      const on = await invoke('toggle_speak');
+      const btn = document.getElementById('speakBtn');
+      btn.classList.toggle('on', on);
+      btn.textContent = on ? '🔊 朗读中' : '🔊 朗读';
+    } catch (e) { console.error(e); }
+  }
+  async function toggleOverlay() {
+    const btn = document.getElementById('overlayBtn');
+    if (!overlayOn) {
+      await invoke('show_overlay');
+      overlayOn = true;
+      btn.classList.add('on');
+    } else {
+      await invoke('hide_overlay');
+      overlayOn = false;
+      btn.classList.remove('on');
+    }
+  }
+
+  // auto voice mode (--voice flag): trigger mic permission + voice start
+  listen('auto-start-voice', async () => {
+    if (!voiceOn) await toggleVoice();
+  });
+</script>
+</body>
+</html>

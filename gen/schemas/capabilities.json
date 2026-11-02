@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Main window capabilities: core APIs used by index.html and overlay.html","local":true,"windows":["main","overlay"],"permissions":["core:default","core:event:default","core:window:default","core:app:default"]}}

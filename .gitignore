@@ -1,0 +1,33 @@
+# Rust and local build environments
+/target/
+/.build/
+
+# Packaged applications and installers
+/MyTranslator.app/
+/MyTranslator.dmg
+
+# Bundled native runtimes are rebuilt from tools/ and native/
+/bin/
+
+# Model weights are several GB and are distributed from their upstream model
+# repositories. Keep the manifest and integrity documentation in Git.
+/models/*
+!/models/MODELS.md
+!/models/SHA256SUMS
+
+# Downloaded benchmark audio, caches, generated manifests, and reports
+/benchmarks/audio/
+/benchmarks/cache/
+/benchmarks/results/
+
+# Local/editor artifacts
+.DS_Store
+*.log
+*.tmp
+*.swp
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+

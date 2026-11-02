@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Subtitle</title>
+<style>
+  :root { --accent: #0a84ff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, "SF Pro Text", "PingFang SC", sans-serif; }
+  html, body { background: transparent; height: 100vh; overflow: hidden; user-select: none; -webkit-user-select: none; }
+  .stage { height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; padding: 16px 24px; gap: 8px; }
+  .heard { font-size: 15px; color: rgba(255,255,255,0.75); text-shadow: 0 1px 4px rgba(0,0,0,0.9), 0 0 12px rgba(0,0,0,0.6); text-align: center; }
+  .trans { font-size: 30px; font-weight: 700; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,1), 0 0 24px rgba(0,0,0,0.9), 0 2px 2px rgba(0,0,0,1); text-align: center; line-height: 1.35; }
+  .trans:empty, .heard:empty { display: none; }
+  .idle { font-size: 12px; color: rgba(255,255,255,0.35); text-shadow: 0 1px 3px rgba(0,0,0,0.8); letter-spacing: 2px; }
+  .pill { background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.22); border-radius: 14px; padding: 10px 22px; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 6px 24px rgba(0,0,0,0.45); }
+  .ctrl { position: absolute; top: 8px; right: 12px; display: flex; gap: 8px; opacity: 0; transition: opacity .2s; }
+  body:hover .ctrl { opacity: 1; }
+  .ctrl button { background: rgba(28,28,30,0.85); color: #fff; border: 0; border-radius: 8px; font-size: 12px; padding: 4px 10px; cursor: pointer; }
+  .grow { display: flex; gap: 6px; opacity: 0; transition: opacity .2s; }
+  body:hover .grow { opacity: 1; }
+</style>
+</head>
+<body data-tauri-drag-region>
+  <div class="ctrl">
+    <button onclick="bigger()" title="增大字号">A+</button>
+    <button onclick="smaller()" title="减小字号">A-</button>
+    <button onclick="closeOverlay()">✕</button>
+  </div>
+  <div class="stage" data-tauri-drag-region>
+    <div class="pill" data-tauri-drag-region>
+      <div class="heard" id="heard"></div>
+      <div class="trans" id="trans" data-tauri-drag-region></div>
+    </div>
+    <div class="idle" id="idle" data-tauri-drag-region>等待语音…</div>
+  </div>
+<script>
+  const { listen } = window.__TAURI__.event;
+  const { getCurrentWindow } = window.__TAURI__.window;
+
+  let fontSize = 30;
+  let latestBatchId = 0;
+  let latestRevision = 0;
+  let currentFragmentIds = [];
+  function bigger() { fontSize = Math.min(fontSize + 4, 64); document.getElementById('trans').style.fontSize = fontSize + 'px'; }
+  function smaller() { fontSize = Math.max(fontSize - 4, 14); document.getElementById('trans').style.fontSize = fontSize + 'px'; }
+  function closeOverlay() { getCurrentWindow().hide(); }
+
+  function payload(e) {
+    if (!e || typeof e !== 'object') return e;
+    if ('payload' in e) return e.payload;
+    if ('data' in e) return e.data;
+    return e;
+  }
+  listen('voice-heard', e => {
+    const p = payload(e);
+    currentFragmentIds = typeof p === 'string' || p?.id == null ? [] : [String(p.id)];
+    document.getElementById('idle').style.display = 'none';
+    document.getElementById('heard').textContent = typeof p === 'string' ? p : (p?.source || '');
+  });
+  listen('voice-semantic-merged', e => {
+    const p = payload(e) || {};
+    latestBatchId = Number(p.batch_id || latestBatchId || 0);
+    latestRevision = Number(p.revision || 0);
+    currentFragmentIds = (p.fragment_ids || []).map(String);
+    document.getElementById('heard').textContent = p.source || '';
+  });
+  listen('voice-asr-revised', e => {
+    const p = payload(e) || {};
+    const ids = (p.fragment_ids || []).map(String);
+    if (currentFragmentIds.length && !ids.some(id => currentFragmentIds.includes(id))) return;
+    const batchId = Number(p.batch_id || latestBatchId || 0);
+    const revision = Number(p.revision || 0);
+    if (batchId && batchId < latestBatchId) return;
+    latestBatchId = Math.max(latestBatchId, batchId);
+    latestRevision = Math.max(latestRevision, revision);
+    document.getElementById('heard').textContent = p.source || '';
+    document.getElementById('trans').textContent = '高精度修正中…';
+  });
+  listen('voice-partial', e => {
+    const text = payload(e) || '';
+    if (text) {
+      document.getElementById('idle').style.display = 'none';
+      document.getElementById('heard').textContent = text;
+    }
+  });
+  listen('voice-translated', e => {
+    const p = payload(e) || {};
+    const batchId = Number(p.batch_id || p.sequence || 0);
+    const revision = Number(p.revision || 0);
+    if (batchId < latestBatchId || (batchId === latestBatchId && revision < latestRevision)) return;
+    latestBatchId = batchId;
+    latestRevision = revision;
+    currentFragmentIds = (p.fragment_ids || []).map(String);
+    document.getElementById('trans').textContent = p.translation;
+    document.getElementById('heard').textContent = p.source;
+  });
+</script>
+</body>
+</html>

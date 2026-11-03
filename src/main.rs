@@ -999,7 +999,140 @@ async fn request_translation(
         .map_err(|e| format!("bad response: {}", e))
 }
 
-fn resolve_translation_direction(text: &str, direction: &str) -> Result<String, String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConversationRoute {
+    enabled: bool,
+    language_a: String,
+    language_b: String,
+}
+
+#[derive(Default)]
+struct ConversationLanguageTracker {
+    epoch: Option<u64>,
+    speaker_turn_id: Option<u64>,
+    source_language: Option<String>,
+}
+
+impl ConversationLanguageTracker {
+    fn resolve(
+        &mut self,
+        epoch: u64,
+        speaker_turn_id: u64,
+        detected_source_language: &str,
+        route: &ConversationRoute,
+    ) -> Result<(String, String), String> {
+        if self.epoch != Some(epoch) {
+            self.epoch = Some(epoch);
+            self.speaker_turn_id = None;
+            self.source_language = None;
+        }
+
+        if self.speaker_turn_id == Some(speaker_turn_id) {
+            if let Some(source_language) = self.source_language.as_deref() {
+                if language_family(source_language) != language_family(detected_source_language) {
+                    log_line(&format!(
+                        "[conversation] ignored language-label drift {} -> {} within speaker turn {}",
+                        source_language, detected_source_language, speaker_turn_id
+                    ));
+                }
+                return resolve_conversation_route(source_language, route);
+            }
+        }
+
+        let resolved = resolve_conversation_route(detected_source_language, route)?;
+        self.speaker_turn_id = Some(speaker_turn_id);
+        self.source_language = Some(resolved.0.clone());
+        Ok(resolved)
+    }
+}
+
+fn language_family(code: &str) -> &str {
+    match code {
+        "zh" | "zh-Hant" | "yue" => "zh",
+        _ => code,
+    }
+}
+
+fn conversation_recognition_language(code: &str) -> Option<&str> {
+    match code {
+        "zh-Hant" => Some("zh"),
+        value if languages::recognition_language(value).is_some() => Some(value),
+        _ => None,
+    }
+}
+
+fn validate_conversation_pair(language_a: &str, language_b: &str) -> Result<(), String> {
+    if language_a == "auto" || language_b == "auto" {
+        return Err("conversation languages must be explicit".into());
+    }
+    validate_target_language(language_a)?;
+    validate_target_language(language_b)?;
+    if conversation_recognition_language(language_a).is_none() {
+        return Err(format!(
+            "unsupported conversation recognition language: {}",
+            language_a
+        ));
+    }
+    if conversation_recognition_language(language_b).is_none() {
+        return Err(format!(
+            "unsupported conversation recognition language: {}",
+            language_b
+        ));
+    }
+    if language_family(language_a) == language_family(language_b) {
+        return Err(format!(
+            "conversation languages must belong to different language families: {} and {}",
+            language_a, language_b
+        ));
+    }
+    Ok(())
+}
+
+fn conversation_pair_supports_qwen(route: &ConversationRoute) -> bool {
+    [route.language_a.as_str(), route.language_b.as_str()]
+        .into_iter()
+        .all(|code| {
+            conversation_recognition_language(code).is_some_and(languages::qwen_asr_supports)
+        })
+}
+
+fn resolve_conversation_route(
+    source_language: &str,
+    route: &ConversationRoute,
+) -> Result<(String, String), String> {
+    if !route.enabled {
+        return Err("conversation translation mode is not enabled".into());
+    }
+    let source_language = languages::language_code(source_language).unwrap_or(source_language);
+    if language_family(source_language) == language_family(&route.language_a) {
+        Ok((route.language_a.clone(), route.language_b.clone()))
+    } else if language_family(source_language) == language_family(&route.language_b) {
+        Ok((route.language_b.clone(), route.language_a.clone()))
+    } else {
+        Err(format!(
+            "detected language {} is outside the conversation pair {} / {}",
+            source_language, route.language_a, route.language_b
+        ))
+    }
+}
+
+fn resolve_conversation_text_route(
+    text: &str,
+    route: &ConversationRoute,
+) -> Result<(String, String), String> {
+    let source_language = resolve_source_language("auto", None, text);
+    resolve_conversation_route(&source_language, route)
+}
+
+fn resolve_translation_direction_with_route(
+    text: &str,
+    direction: &str,
+    route: &ConversationRoute,
+) -> Result<String, String> {
+    if direction == "conversation" {
+        let (_, target_language) = resolve_conversation_text_route(text, route)?;
+        return Ok(format!("to:{}", target_language));
+    }
     if direction != "auto" {
         if matches!(direction, "en2zh" | "zh2en") {
             return Ok(direction.to_string());
@@ -1017,6 +1150,11 @@ fn resolve_translation_direction(text: &str, direction: &str) -> Result<String, 
             || ('\u{AC00}'..='\u{D7AF}').contains(&c)
     });
     Ok(if cjk { "zh2en" } else { "en2zh" }.to_string())
+}
+
+fn resolve_translation_direction(text: &str, direction: &str) -> Result<String, String> {
+    let route = voice_conversation_route().lock().unwrap().clone();
+    resolve_translation_direction_with_route(text, direction, &route)
 }
 
 fn resolve_target_language(text: &str, direction: &str) -> Result<String, String> {
@@ -2314,8 +2452,16 @@ async fn translate_with_context(
     state: State<'_, LlamaState>,
     context: &[TranslationContextEntry],
 ) -> Result<TranslateResult, String> {
-    let direction = resolve_translation_direction(&text, &direction)?;
-    let source_language = resolve_source_language("auto", None, &text);
+    let route = voice_conversation_route().lock().unwrap().clone();
+    let (direction, source_language) = if direction == "conversation" {
+        let (source_language, target_language) = resolve_conversation_text_route(&text, &route)?;
+        (format!("to:{}", target_language), source_language)
+    } else {
+        (
+            resolve_translation_direction_with_route(&text, &direction, &route)?,
+            resolve_source_language("auto", None, &text),
+        )
+    };
     let target_language = resolve_target_language(&text, &direction)?;
     translate_with_language_context(
         text,
@@ -2355,6 +2501,8 @@ async fn server_status(state: State<'_, LlamaState>) -> Result<serde_json::Value
 
 static VOICE: OnceLock<voice::VoicePipeline> = OnceLock::new();
 static VOICE_DIRECTION: OnceLock<Mutex<String>> = OnceLock::new();
+static VOICE_TARGET_LANGUAGE: OnceLock<Mutex<String>> = OnceLock::new();
+static VOICE_CONVERSATION_ROUTE: OnceLock<Mutex<ConversationRoute>> = OnceLock::new();
 static VOICE_MODEL: OnceLock<Mutex<String>> = OnceLock::new();
 static VOICE_ASR_MODEL: OnceLock<Mutex<String>> = OnceLock::new();
 static VOICE_QUALITY_PROFILE: OnceLock<Mutex<String>> = OnceLock::new();
@@ -4326,6 +4474,36 @@ fn voice_direction() -> &'static Mutex<String> {
     VOICE_DIRECTION.get_or_init(|| Mutex::new("auto".into()))
 }
 
+fn voice_target_language() -> &'static Mutex<String> {
+    VOICE_TARGET_LANGUAGE.get_or_init(|| Mutex::new(default_target_language()))
+}
+
+fn voice_conversation_route() -> &'static Mutex<ConversationRoute> {
+    VOICE_CONVERSATION_ROUTE.get_or_init(|| {
+        Mutex::new(ConversationRoute {
+            enabled: false,
+            language_a: default_conversation_language_a(),
+            language_b: default_conversation_language_b(),
+        })
+    })
+}
+
+fn effective_asr_language(route: &ConversationRoute) -> String {
+    if route.enabled {
+        "auto".to_string()
+    } else {
+        std::env::var("MYT_ASR_LANG").unwrap_or_else(|_| default_asr_language())
+    }
+}
+
+fn qwen_asr_supported_for_route(route: &ConversationRoute, language: &str) -> bool {
+    if route.enabled {
+        conversation_pair_supports_qwen(route)
+    } else {
+        languages::qwen_asr_supports(language)
+    }
+}
+
 fn voice_model() -> &'static Mutex<String> {
     VOICE_MODEL.get_or_init(|| Mutex::new("hy-mt2".into()))
 }
@@ -4408,6 +4586,12 @@ struct VoicePreferences {
     asr_language: String,
     #[serde(default = "default_target_language")]
     target_language: String,
+    #[serde(default = "default_translation_mode")]
+    translation_mode: String,
+    #[serde(default = "default_conversation_language_a")]
+    conversation_language_a: String,
+    #[serde(default = "default_conversation_language_b")]
+    conversation_language_b: String,
 }
 
 fn default_asr_model() -> String {
@@ -4420,6 +4604,18 @@ fn default_asr_language() -> String {
 
 fn default_target_language() -> String {
     "auto".to_string()
+}
+
+fn default_translation_mode() -> String {
+    "single".to_string()
+}
+
+fn default_conversation_language_a() -> String {
+    "zh".to_string()
+}
+
+fn default_conversation_language_b() -> String {
+    "en".to_string()
 }
 
 fn validate_asr_language(language: &str) -> Result<(), String> {
@@ -4439,12 +4635,7 @@ fn validate_target_language(language: &str) -> Result<(), String> {
 }
 
 fn current_target_language() -> String {
-    match voice_direction().lock().unwrap().as_str() {
-        "auto" => "auto".to_string(),
-        "en2zh" => "zh".to_string(),
-        "zh2en" => "en".to_string(),
-        direction => direction.strip_prefix("to:").unwrap_or("auto").to_string(),
-    }
+    voice_target_language().lock().unwrap().clone()
 }
 
 fn validate_asr_model(model: &str) -> Result<(), String> {
@@ -4478,11 +4669,33 @@ fn save_voice_preferences(
     asr_language: &str,
     target_language: &str,
 ) -> Result<(), String> {
+    let route = voice_conversation_route().lock().unwrap().clone();
+    save_voice_preferences_for_route(
+        app,
+        input_mode,
+        asr_model,
+        quality_profile,
+        asr_language,
+        target_language,
+        &route,
+    )
+}
+
+fn save_voice_preferences_for_route(
+    app: &tauri::AppHandle,
+    input_mode: &str,
+    asr_model: &str,
+    quality_profile: &str,
+    asr_language: &str,
+    target_language: &str,
+    route: &ConversationRoute,
+) -> Result<(), String> {
     validate_voice_input_mode(input_mode)?;
     validate_asr_model(asr_model)?;
     quality_profile_config(quality_profile)?;
     validate_asr_language(asr_language)?;
     validate_target_language(target_language)?;
+    validate_conversation_pair(&route.language_a, &route.language_b)?;
     let path = voice_preferences_path(app)?;
     let parent = path.parent().ok_or("invalid voice preferences path")?;
     std::fs::create_dir_all(parent)
@@ -4494,6 +4707,13 @@ fn save_voice_preferences(
         quality_profile: quality_profile.to_string(),
         asr_language: asr_language.to_string(),
         target_language: target_language.to_string(),
+        translation_mode: if route.enabled {
+            "conversation".to_string()
+        } else {
+            default_translation_mode()
+        },
+        conversation_language_a: route.language_a.clone(),
+        conversation_language_b: route.language_b.clone(),
     })
     .map_err(|error| error.to_string())?;
     std::fs::write(&temporary, data)
@@ -4507,7 +4727,7 @@ fn load_voice_preferences(
     app: &tauri::AppHandle,
 ) -> Result<(String, String, String, String, String), String> {
     let path = voice_preferences_path(app)?;
-    let (input_mode, quality_profile, asr_language, target_language) = if path.exists() {
+    let (input_mode, quality_profile, asr_language, target_language, route) = if path.exists() {
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
         let preferences: VoicePreferences = serde_json::from_slice(&bytes)
@@ -4517,11 +4737,30 @@ fn load_voice_preferences(
         quality_profile_config(&preferences.quality_profile)?;
         validate_asr_language(&preferences.asr_language)?;
         validate_target_language(&preferences.target_language)?;
+        if !matches!(
+            preferences.translation_mode.as_str(),
+            "single" | "conversation"
+        ) {
+            return Err(format!(
+                "unsupported translation mode: {}",
+                preferences.translation_mode
+            ));
+        }
+        validate_conversation_pair(
+            &preferences.conversation_language_a,
+            &preferences.conversation_language_b,
+        )?;
+        let route = ConversationRoute {
+            enabled: preferences.translation_mode == "conversation",
+            language_a: preferences.conversation_language_a,
+            language_b: preferences.conversation_language_b,
+        };
         (
             preferences.input_mode,
             preferences.quality_profile,
             preferences.asr_language,
             preferences.target_language,
+            route,
         )
     } else {
         (
@@ -4529,6 +4768,11 @@ fn load_voice_preferences(
             default_quality_profile(),
             default_asr_language(),
             default_target_language(),
+            ConversationRoute {
+                enabled: false,
+                language_a: default_conversation_language_a(),
+                language_b: default_conversation_language_b(),
+            },
         )
     };
     let config = quality_profile_config(&quality_profile)?;
@@ -4539,7 +4783,11 @@ fn load_voice_preferences(
     *voice_model().lock().unwrap() = config.translation_model.to_string();
     *voice_quality_profile().lock().unwrap() = quality_profile.clone();
     std::env::set_var("MYT_ASR_LANG", &asr_language);
-    *voice_direction().lock().unwrap() = if target_language == "auto" {
+    *voice_target_language().lock().unwrap() = target_language.clone();
+    *voice_conversation_route().lock().unwrap() = route.clone();
+    *voice_direction().lock().unwrap() = if route.enabled {
+        "conversation".to_string()
+    } else if target_language == "auto" {
         "auto".to_string()
     } else {
         format!("to:{}", target_language)
@@ -4559,6 +4807,9 @@ fn load_voice_preferences(
 
 fn reset_voice_source_state() {
     reset_adaptive_quality_window();
+    if let Some(pipeline) = VOICE.get() {
+        pipeline.request_state_reset();
+    }
     bump_epoch();
     PARTIAL_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     *partial_committed().lock().unwrap() = (0, String::new());
@@ -4653,11 +4904,12 @@ fn qwen_asr_review_available() -> bool {
     // In non-fast Whisper mode, Qwen-ASR may be used as an optional reviewer.
     // In Qwen-ASR mode the same worker is already the primary final recognizer,
     // so a separate review is unnecessary.
-    let language = std::env::var("MYT_ASR_LANG").unwrap_or_else(|_| default_asr_language());
+    let route = voice_conversation_route().lock().unwrap().clone();
+    let language = effective_asr_language(&route);
     *voice_asr_model().lock().unwrap() == "whisper"
         && *voice_quality_profile().lock().unwrap() != "fast"
         && *voice_model().lock().unwrap() != "qwen3.5"
-        && languages::qwen_asr_supports(&language)
+        && qwen_asr_supported_for_route(&route, &language)
         && qwen_asr_available()
 }
 
@@ -5766,12 +6018,14 @@ fn start_voice_capture(app: tauri::AppHandle) -> Result<(), String> {
     // resident so no sentence pays a model-reload penalty.
     let warm_model = voice_model().lock().unwrap().clone();
     let warm_asr_model = voice_asr_model().lock().unwrap().clone();
-    let warm_asr_language =
-        std::env::var("MYT_ASR_LANG").unwrap_or_else(|_| default_asr_language());
+    let warm_conversation_route = voice_conversation_route().lock().unwrap().clone();
+    let warm_asr_language = effective_asr_language(&warm_conversation_route);
     let warm_profile = voice_quality_profile().lock().unwrap().clone();
     tauri::async_runtime::spawn(async move {
         let asr = async {
-            if warm_asr_model == "qwen3-asr" && languages::qwen_asr_supports(&warm_asr_language) {
+            if warm_asr_model == "qwen3-asr"
+                && qwen_asr_supported_for_route(&warm_conversation_route, &warm_asr_language)
+            {
                 warm_qwen_asr_worker().await?;
             }
             ensure_whisper_server().await
@@ -5857,6 +6111,7 @@ fn start_voice_capture(app: tauri::AppHandle) -> Result<(), String> {
     let asr_app = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut stable_state = StableTranscriptState::default();
+        let mut conversation_language_tracker = ConversationLanguageTracker::default();
         let mut deferred_job: Option<AsrJob> = None;
         loop {
             let mut job = if let Some(deferred) = deferred_job.take() {
@@ -5911,6 +6166,7 @@ fn start_voice_capture(app: tauri::AppHandle) -> Result<(), String> {
                 direction,
                 model,
                 &mut stable_state,
+                &mut conversation_language_tracker,
                 &semantic_tx,
             )
             .await
@@ -6018,7 +6274,8 @@ async fn run_partial_asr(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_default();
-    let lang = std::env::var("MYT_ASR_LANG").unwrap_or_else(|_| "zh".to_string());
+    let conversation_route = voice_conversation_route().lock().unwrap().clone();
+    let lang = effective_asr_language(&conversation_route);
     let mut command = tokio::process::Command::new(whisper_cli_path());
     command.args([
         "-m",
@@ -6585,25 +6842,27 @@ mod asr_filter_tests {
         assess_translation_review_need, can_coalesce_asr_checkpoint, choose_reviewed_transcript,
         choose_selective_reviewed_transcript, choose_term_consistent_transcript,
         classify_endpoint_semantics, clean_asr_text, clean_translation_output,
-        ends_semantic_boundary, extract_contextual_chinese_terms, find_phonetic_variant,
-        is_final_hypothesis_collapse, matching_glossary_terms, normalize_asr_script,
-        parse_cli_full_transcript, parse_qwen_translation_response, parse_qwen_worker_response,
-        parse_server_transcript, prepare_glossary_text, quality_profile_config,
-        resolve_source_language, resolve_target_language, resolve_translation_direction,
-        restore_glossary_terms, review_translation_with_qwen, should_apply_translation_review,
-        should_use_high_accuracy, should_use_translation_context, split_semantic_commit,
-        stop_qwen_translation_worker, strip_rolling_overlap, target_vad_extension_ms,
-        translate_direct_with_qwen, translation_matches_target_language, translation_target_name,
-        validate_asr_model, validate_voice_input_mode, AsrHotwordState, AsrRevision,
-        AsrTermConcern, EndpointSemanticHint, GlossaryEntry, ReviewedTranscriptChoice,
-        RollingCompletionTier, SegmentEndGuard, SemanticEvent, SemanticFragment,
-        SemanticMergeBuffer, SpeakerBoundaryGuard, StableTranscriptState, TranslationContextEntry,
-        TranslationContextWindow, VoicePreferences, ASR_HOTWORD_MAX_CHARS, ASR_HOTWORD_MAX_TERMS,
-        ROLLING_COMPLETION_FLUSH_SCORE, SEMANTIC_MAX_EXTENSIONS, SEMANTIC_MAX_HOLD_MS,
-        SEMANTIC_NATURAL_INCOMPLETE_HOLD_MS, SEMANTIC_NATURAL_INCOMPLETE_MAX_HOLD_MS,
-        SEMANTIC_NATURAL_LOW_YIELD_MAX_HOLD_MS, SEMANTIC_NATURAL_PROBABLE_HOLD_MS,
-        SEMANTIC_NATURAL_PROBABLE_MAX_HOLD_MS, SEMANTIC_ROLLING_PROBABLE_MAX_EXTENSIONS,
-        SEMANTIC_ROLLING_PROBABLE_MAX_HOLD_MS,
+        conversation_pair_supports_qwen, ends_semantic_boundary, extract_contextual_chinese_terms,
+        find_phonetic_variant, is_final_hypothesis_collapse, matching_glossary_terms,
+        normalize_asr_script, parse_cli_full_transcript, parse_qwen_translation_response,
+        parse_qwen_worker_response, parse_server_transcript, prepare_glossary_text,
+        quality_profile_config, resolve_conversation_route, resolve_source_language,
+        resolve_target_language, resolve_translation_direction,
+        resolve_translation_direction_with_route, restore_glossary_terms,
+        review_translation_with_qwen, should_apply_translation_review, should_use_high_accuracy,
+        should_use_translation_context, split_semantic_commit, stop_qwen_translation_worker,
+        strip_rolling_overlap, target_vad_extension_ms, translate_direct_with_qwen,
+        translation_matches_target_language, translation_target_name, validate_asr_model,
+        validate_conversation_pair, validate_voice_input_mode, AsrHotwordState, AsrRevision,
+        AsrTermConcern, ConversationLanguageTracker, ConversationRoute, EndpointSemanticHint,
+        GlossaryEntry, ReviewedTranscriptChoice, RollingCompletionTier, SegmentEndGuard,
+        SemanticEvent, SemanticFragment, SemanticMergeBuffer, SpeakerBoundaryGuard,
+        StableTranscriptState, TranslationContextEntry, TranslationContextWindow, VoicePreferences,
+        ASR_HOTWORD_MAX_CHARS, ASR_HOTWORD_MAX_TERMS, ROLLING_COMPLETION_FLUSH_SCORE,
+        SEMANTIC_MAX_EXTENSIONS, SEMANTIC_MAX_HOLD_MS, SEMANTIC_NATURAL_INCOMPLETE_HOLD_MS,
+        SEMANTIC_NATURAL_INCOMPLETE_MAX_HOLD_MS, SEMANTIC_NATURAL_LOW_YIELD_MAX_HOLD_MS,
+        SEMANTIC_NATURAL_PROBABLE_HOLD_MS, SEMANTIC_NATURAL_PROBABLE_MAX_HOLD_MS,
+        SEMANTIC_ROLLING_PROBABLE_MAX_EXTENSIONS, SEMANTIC_ROLLING_PROBABLE_MAX_HOLD_MS,
     };
 
     fn semantic_fragment(
@@ -6658,6 +6917,9 @@ mod asr_filter_tests {
             quality_profile: "balanced".into(),
             asr_language: "ja".into(),
             target_language: "fr".into(),
+            translation_mode: "conversation".into(),
+            conversation_language_a: "ja".into(),
+            conversation_language_b: "fr".into(),
         })
         .unwrap();
         let restored: VoicePreferences = serde_json::from_str(&saved).unwrap();
@@ -6665,6 +6927,9 @@ mod asr_filter_tests {
         assert_eq!(restored.asr_model, "qwen3-asr");
         assert_eq!(restored.asr_language, "ja");
         assert_eq!(restored.target_language, "fr");
+        assert_eq!(restored.translation_mode, "conversation");
+        assert_eq!(restored.conversation_language_a, "ja");
+        assert_eq!(restored.conversation_language_b, "fr");
         assert!(validate_asr_model("whisper").is_ok());
         assert!(validate_asr_model("qwen3-asr").is_ok());
         assert!(validate_asr_model("unknown").is_err());
@@ -6675,6 +6940,109 @@ mod asr_filter_tests {
         assert_eq!(legacy.quality_profile, "balanced");
         assert_eq!(legacy.asr_language, "zh");
         assert_eq!(legacy.target_language, "auto");
+        assert_eq!(legacy.translation_mode, "single");
+        assert_eq!(legacy.conversation_language_a, "zh");
+        assert_eq!(legacy.conversation_language_b, "en");
+    }
+
+    #[test]
+    fn conversation_route_is_bidirectional_and_chinese_family_aware() {
+        let route = ConversationRoute {
+            enabled: true,
+            language_a: "zh-Hant".into(),
+            language_b: "en".into(),
+        };
+        assert_eq!(
+            resolve_conversation_route("zh", &route).unwrap(),
+            ("zh-Hant".to_string(), "en".to_string())
+        );
+        assert_eq!(
+            resolve_conversation_route("yue", &route).unwrap(),
+            ("zh-Hant".to_string(), "en".to_string())
+        );
+        assert_eq!(
+            resolve_conversation_route("en", &route).unwrap(),
+            ("en".to_string(), "zh-Hant".to_string())
+        );
+        assert!(resolve_conversation_route("fr", &route).is_err());
+    }
+
+    #[test]
+    fn conversation_pair_requires_distinct_recognizable_families() {
+        assert!(validate_conversation_pair("zh", "en").is_ok());
+        assert!(validate_conversation_pair("zh", "zh-Hant").is_err());
+        assert!(validate_conversation_pair("zh", "yue").is_err());
+        assert!(validate_conversation_pair("auto", "en").is_err());
+        assert!(validate_conversation_pair("ug", "en").is_err());
+    }
+
+    #[test]
+    fn conversation_qwen_requires_support_for_both_languages() {
+        let supported = ConversationRoute {
+            enabled: true,
+            language_a: "zh".into(),
+            language_b: "en".into(),
+        };
+        let unsupported = ConversationRoute {
+            enabled: true,
+            language_a: "he".into(),
+            language_b: "en".into(),
+        };
+        assert!(conversation_pair_supports_qwen(&supported));
+        assert!(!conversation_pair_supports_qwen(&unsupported));
+    }
+
+    #[test]
+    fn conversation_language_stays_locked_until_the_speaker_turn_changes() {
+        let route = ConversationRoute {
+            enabled: true,
+            language_a: "en".into(),
+            language_b: "fr".into(),
+        };
+        let mut tracker = ConversationLanguageTracker::default();
+        assert_eq!(
+            tracker.resolve(7, 11, "en", &route).unwrap(),
+            ("en".to_string(), "fr".to_string())
+        );
+        assert_eq!(
+            tracker.resolve(7, 11, "fr", &route).unwrap(),
+            ("en".to_string(), "fr".to_string())
+        );
+        assert_eq!(
+            tracker.resolve(7, 12, "fr", &route).unwrap(),
+            ("fr".to_string(), "en".to_string())
+        );
+        assert_eq!(
+            tracker.resolve(8, 12, "en", &route).unwrap(),
+            ("en".to_string(), "fr".to_string())
+        );
+    }
+
+    #[test]
+    fn manual_conversation_direction_routes_to_the_other_language() {
+        let route = ConversationRoute {
+            enabled: true,
+            language_a: "zh".into(),
+            language_b: "en".into(),
+        };
+        assert_eq!(
+            resolve_translation_direction_with_route(
+                "你好，今天过得怎么样？",
+                "conversation",
+                &route
+            )
+            .unwrap(),
+            "to:en"
+        );
+        assert_eq!(
+            resolve_translation_direction_with_route(
+                "Hello, how are you doing today?",
+                "conversation",
+                &route,
+            )
+            .unwrap(),
+            "to:zh"
+        );
     }
 
     #[test]
@@ -8546,6 +8914,7 @@ async fn run_asr_checkpoint(
     direction: String,
     model: String,
     stable_state: &mut StableTranscriptState,
+    conversation_language_tracker: &mut ConversationLanguageTracker,
     semantic_tx: &tokio::sync::mpsc::UnboundedSender<SemanticEvent>,
 ) -> Result<(), String> {
     let voice::VoiceChunk {
@@ -8582,8 +8951,10 @@ async fn run_asr_checkpoint(
         end_reason,
         semantic_tx,
     );
-    // recognition language: from env var set by set_asr_lang command
-    let lang = std::env::var("MYT_ASR_LANG").unwrap_or_else(|_| "zh".to_string());
+    // Conversation mode must let ASR report the spoken language for every
+    // turn; single-direction mode keeps the user's fixed/automatic choice.
+    let conversation_route = voice_conversation_route().lock().unwrap().clone();
+    let lang = effective_asr_language(&conversation_route);
     let audio_stats = match wav_stats(&wav_path) {
         Ok(stats) => stats,
         Err(error) => {
@@ -8629,8 +9000,9 @@ async fn run_asr_checkpoint(
     }
     let asr_start = std::time::Instant::now();
     let selected_asr_model = voice_asr_model().lock().unwrap().clone();
-    let use_qwen_final =
-        is_final && selected_asr_model == "qwen3-asr" && languages::qwen_asr_supports(&lang);
+    let use_qwen_final = is_final
+        && selected_asr_model == "qwen3-asr"
+        && qwen_asr_supported_for_route(&conversation_route, &lang);
     let (transcript, asr_engine) = if use_qwen_final {
         match transcribe_with_qwen(
             &wav_path,
@@ -8993,9 +9365,21 @@ async fn run_asr_checkpoint(
         record_asr_hotword_context(epoch_at_start, &lang, &text);
     }
 
-    let source_language =
+    let detected_source_language =
         resolve_source_language(&lang, transcript.detected_language.as_deref(), &text);
-    let target_language = resolve_target_language(&text, &direction)?;
+    let (source_language, target_language, effective_direction) = if conversation_route.enabled {
+        let (source_language, target_language) = conversation_language_tracker.resolve(
+            epoch_at_start,
+            speaker_turn_id,
+            &detected_source_language,
+            &conversation_route,
+        )?;
+        let effective_direction = format!("to:{}", target_language);
+        (source_language, target_language, effective_direction)
+    } else {
+        let target_language = resolve_target_language(&text, &direction)?;
+        (detected_source_language, target_language, direction.clone())
+    };
 
     let background_plan = background_review_needed.then(|| BackgroundAsrReviewPlan {
         wav_path: wav_path.clone(),
@@ -9092,7 +9476,7 @@ async fn run_asr_checkpoint(
                 is_final: part_is_final,
                 end_reason,
                 text,
-                direction: direction.clone(),
+                direction: effective_direction.clone(),
                 source_language: source_language.clone(),
                 target_language: target_language.clone(),
                 model: model.clone(),
@@ -10074,9 +10458,10 @@ async fn run_translation_job(
     if speak_on().load(std::sync::atomic::Ordering::Relaxed) {
         let app2 = app.clone();
         let spoken = result.translation.clone();
+        let spoken_language = target_language.clone();
         let _ = tauri::async_runtime::spawn(async move {
             let _ = app2;
-            speak_aloud(&spoken).await;
+            speak_aloud(&spoken, &spoken_language).await;
         });
     }
     save_transcript(&source, &result.translation);
@@ -10132,9 +10517,11 @@ async fn voice_status() -> Result<serde_json::Value, String> {
         .map(|p| p.running.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(false);
     let asr_language = std::env::var("MYT_ASR_LANG").unwrap_or_else(|_| default_asr_language());
+    let conversation_route = voice_conversation_route().lock().unwrap().clone();
+    let active_asr_language = effective_asr_language(&conversation_route);
     let configured_recognition_model = voice_asr_model().lock().unwrap().clone();
     let effective_recognition_model = if configured_recognition_model == "qwen3-asr"
-        && languages::qwen_asr_supports(&asr_language)
+        && qwen_asr_supported_for_route(&conversation_route, &active_asr_language)
     {
         "qwen3-asr"
     } else {
@@ -10211,8 +10598,12 @@ async fn voice_status() -> Result<serde_json::Value, String> {
         "recognition_model": configured_recognition_model,
         "effective_recognition_model": effective_recognition_model,
         "asr_language": asr_language,
+        "effective_asr_language": active_asr_language,
         "target_language": current_target_language(),
         "direction": voice_direction().lock().unwrap().clone(),
+        "translation_mode": if conversation_route.enabled { "conversation" } else { "single" },
+        "conversation_language_a": conversation_route.language_a,
+        "conversation_language_b": conversation_route.language_b,
         "translation_model": voice_model().lock().unwrap().clone(),
         "quality_profile": voice_quality_profile().lock().unwrap().clone(),
         "input_mode": voice_input_mode(),
@@ -10397,23 +10788,93 @@ pub fn is_self_speaking() -> bool {
         && std::time::Instant::now() < *speaking_until().lock().unwrap()
 }
 
-/// Read text aloud with the macOS `say` CLI. Chinese gets a zh voice,
-/// everything else uses an English one.
-async fn speak_aloud(text: &str) {
+/// Cache the installed macOS voices by locale for multilingual interpreter mode.
+fn installed_speech_voices() -> &'static std::collections::HashMap<String, String> {
+    static VOICES: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
+    VOICES.get_or_init(|| {
+        let output = std::process::Command::new("say").args(["-v", "?"]).output();
+        let mut voices = std::collections::HashMap::new();
+        let Ok(output) = output else {
+            return voices;
+        };
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let locale = line.split_whitespace().find(|token| {
+                token
+                    .split_once('_')
+                    .is_some_and(|(language, region)| language.len() >= 2 && region.len() >= 2)
+            });
+            let Some(locale) = locale else {
+                continue;
+            };
+            let Some(locale_offset) = line.find(locale) else {
+                continue;
+            };
+            let voice = line[..locale_offset].trim();
+            if !voice.is_empty() {
+                voices
+                    .entry(locale.to_string())
+                    .or_insert_with(|| voice.to_string());
+            }
+        }
+        voices
+    })
+}
+
+fn speech_voice_for_language(language: &str) -> Option<String> {
+    let voices = installed_speech_voices();
+    let preferred_locales: &[&str] = match language {
+        "zh" => &["zh_CN", "zh_TW", "zh_HK"],
+        "zh-Hant" => &["zh_TW", "zh_HK", "zh_CN"],
+        "yue" => &["yue_HK", "zh_HK", "zh_CN"],
+        "en" => &["en_US", "en_GB", "en_AU"],
+        "fr" => &["fr_FR", "fr_CA"],
+        "es" => &["es_ES", "es_MX"],
+        "pt" => &["pt_BR", "pt_PT"],
+        _ => &[],
+    };
+    for locale in preferred_locales {
+        if let Some(voice) = voices.get(*locale) {
+            return Some(voice.clone());
+        }
+    }
+    let locale_language = match language {
+        "tl" => "fil",
+        value => value,
+    };
+    voices.iter().find_map(|(locale, voice)| {
+        locale
+            .strip_prefix(locale_language)
+            .filter(|suffix| suffix.starts_with('_'))
+            .map(|_| voice.clone())
+    })
+}
+
+/// Read text aloud with a macOS voice matching the translated language.
+/// If that voice is not installed, say falls back to the user's system voice.
+async fn speak_aloud(text: &str, target_language: &str) {
     if text.trim().is_empty() {
         return;
     }
-    let cjk = text.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
-    let voice = if cjk { "Tingting" } else { "Samantha" };
+    let target_language = target_language.to_string();
+    let voice = tokio::task::spawn_blocking(move || speech_voice_for_language(&target_language))
+        .await
+        .ok()
+        .flatten();
     // estimate duration: ~4 chars/sec speech rate + 1s tail
     let est_secs = (text.chars().count() as f32 / 4.0).ceil() as u64 + 1;
     *speaking_until().lock().unwrap() =
         std::time::Instant::now() + std::time::Duration::from_secs(est_secs);
-    log_line(&format!("[speak] {} ({}s): {}", voice, est_secs, text));
-    let _ = tokio::process::Command::new("say")
-        .args(["-v", voice, text])
-        .output()
-        .await;
+    log_line(&format!(
+        "[speak] voice={} ({}s): {}",
+        voice.as_deref().unwrap_or("system-default"),
+        est_secs,
+        text
+    ));
+    let mut command = tokio::process::Command::new("say");
+    if let Some(voice) = voice {
+        command.args(["-v", &voice]);
+    }
+    let _ = command.arg(text).output().await;
 }
 
 #[tauri::command]
@@ -10501,10 +10962,12 @@ async fn set_asr_lang(app: tauri::AppHandle, lang: String) -> Result<(), String>
     save_voice_preferences(&app, &input_mode, &asr_model, &profile, &lang, &target)?;
     std::env::set_var("MYT_ASR_LANG", &lang);
     reset_voice_source_state();
+    let conversation_route = voice_conversation_route().lock().unwrap().clone();
     log_line(&format!(
         "[asr-lang] switched to {} (final_engine={})",
         lang,
-        if *voice_asr_model().lock().unwrap() == "qwen3-asr" && languages::qwen_asr_supports(&lang)
+        if *voice_asr_model().lock().unwrap() == "qwen3-asr"
+            && qwen_asr_supported_for_route(&conversation_route, &lang)
         {
             "qwen3-asr"
         } else {
@@ -10529,14 +10992,84 @@ async fn set_target_language(app: tauri::AppHandle, lang: String) -> Result<(), 
         &asr_language,
         &lang,
     )?;
-    *voice_direction().lock().unwrap() = if lang == "auto" {
-        "auto".to_string()
-    } else {
-        format!("to:{}", lang)
-    };
+    *voice_target_language().lock().unwrap() = lang.clone();
+    if !voice_conversation_route().lock().unwrap().enabled {
+        *voice_direction().lock().unwrap() = if lang == "auto" {
+            "auto".to_string()
+        } else {
+            format!("to:{}", lang)
+        };
+    }
     reset_voice_source_state();
     log_line(&format!("[translation-target] switched to {}", lang));
     Ok(())
+}
+
+/// Atomically select the two spoken languages and enable/disable bidirectional
+/// conversation routing. The previous single-direction target stays saved so
+/// disabling conversation mode restores it immediately.
+#[tauri::command]
+async fn set_conversation_languages(
+    app: tauri::AppHandle,
+    enabled: bool,
+    language_a: String,
+    language_b: String,
+) -> Result<serde_json::Value, String> {
+    validate_conversation_pair(&language_a, &language_b)?;
+    let route = ConversationRoute {
+        enabled,
+        language_a,
+        language_b,
+    };
+    let input_mode = preferred_voice_input().lock().unwrap().clone();
+    let asr_model = voice_asr_model().lock().unwrap().clone();
+    let profile = voice_quality_profile().lock().unwrap().clone();
+    let asr_language = std::env::var("MYT_ASR_LANG").unwrap_or_else(|_| default_asr_language());
+    let target_language = current_target_language();
+
+    // The preferences file is replaced atomically before the live route is
+    // exposed, so a write failure leaves both languages and the mode unchanged.
+    save_voice_preferences_for_route(
+        &app,
+        &input_mode,
+        &asr_model,
+        &profile,
+        &asr_language,
+        &target_language,
+        &route,
+    )?;
+
+    *voice_conversation_route().lock().unwrap() = route.clone();
+    *voice_direction().lock().unwrap() = if enabled {
+        "conversation".to_string()
+    } else if target_language == "auto" {
+        "auto".to_string()
+    } else {
+        format!("to:{}", target_language)
+    };
+    reset_voice_source_state();
+
+    let active_asr_language = effective_asr_language(&route);
+    let effective_recognition_model =
+        if asr_model == "qwen3-asr" && qwen_asr_supported_for_route(&route, &active_asr_language) {
+            "qwen3-asr"
+        } else {
+            "whisper"
+        };
+    log_line(&format!(
+        "[conversation] mode={}, languages={}/{}, final_engine={}",
+        if enabled { "conversation" } else { "single" },
+        route.language_a,
+        route.language_b,
+        effective_recognition_model
+    ));
+    Ok(serde_json::json!({
+        "translation_mode": if enabled { "conversation" } else { "single" },
+        "conversation_language_a": route.language_a,
+        "conversation_language_b": route.language_b,
+        "direction": voice_direction().lock().unwrap().clone(),
+        "effective_recognition_model": effective_recognition_model,
+    }))
 }
 
 #[tauri::command]
@@ -10580,7 +11113,11 @@ async fn set_quality_profile(
     let config = quality_profile_config(&profile)?;
     validate_translation_model(config.translation_model)?;
     validate_asr_model(config.asr_model)?;
-    if config.asr_model == "qwen3-asr" && !qwen_asr_available() {
+    let conversation_route = voice_conversation_route().lock().unwrap().clone();
+    let active_asr_language = effective_asr_language(&conversation_route);
+    let qwen_will_be_effective = config.asr_model == "qwen3-asr"
+        && qwen_asr_supported_for_route(&conversation_route, &active_asr_language);
+    if qwen_will_be_effective && !qwen_asr_available() {
         return Err("Qwen3-ASR-1.7B 8bit model or runtime is unavailable".into());
     }
 
@@ -10619,6 +11156,7 @@ async fn set_quality_profile(
     }
 
     let profile_for_warmup = profile.clone();
+    let warm_qwen_asr = qwen_will_be_effective;
     tauri::async_runtime::spawn(async move {
         let hy_path = match translation_model_path("hy-mt2") {
             Ok(path) => path,
@@ -10638,15 +11176,17 @@ async fn set_quality_profile(
             }
             return;
         }
-        let (asr, translator) = tokio::join!(
-            warm_qwen_asr_worker(),
-            ensure_server(&hy_path, LLAMA_SERVER_PORT),
-        );
+        let asr = async {
+            if warm_qwen_asr {
+                warm_qwen_asr_worker().await
+            } else {
+                stop_qwen_asr_worker().await;
+                ensure_whisper_server().await
+            }
+        };
+        let (asr, translator) = tokio::join!(asr, ensure_server(&hy_path, LLAMA_SERVER_PORT));
         if let Err(error) = asr {
-            log_line(&format!(
-                "[quality-profile] Qwen-ASR warmup failed: {}",
-                error
-            ));
+            log_line(&format!("[quality-profile] ASR warmup failed: {}", error));
         }
         if let Err(error) = translator {
             log_line(&format!(
@@ -10689,7 +11229,31 @@ async fn set_asr_model(app: tauri::AppHandle, model: String) -> Result<(), Strin
 /// Update voice routing while microphone capture remains active.
 #[tauri::command]
 async fn set_voice_options(direction: String, model: String) -> Result<(), String> {
-    if direction != "auto" && !matches!(direction.as_str(), "en2zh" | "zh2en") {
+    let conversation_enabled = voice_conversation_route().lock().unwrap().enabled;
+    let direction = if conversation_enabled {
+        "conversation".to_string()
+    } else {
+        let target_language = current_target_language();
+        let saved_direction = if target_language == "auto" {
+            "auto".to_string()
+        } else {
+            format!("to:{}", target_language)
+        };
+        if direction != saved_direction {
+            log_line(&format!(
+                "[voice] ignored stale frontend direction {}; saved target requires {}",
+                direction, saved_direction
+            ));
+        }
+        saved_direction
+    };
+    if direction == "conversation" && !conversation_enabled {
+        return Err("conversation translation mode is not enabled".into());
+    }
+    if direction != "auto"
+        && direction != "conversation"
+        && !matches!(direction.as_str(), "en2zh" | "zh2en")
+    {
         let code = direction
             .strip_prefix("to:")
             .ok_or_else(|| format!("unknown direction: {}", direction))?;
@@ -10844,6 +11408,7 @@ fn main() {
             language_options,
             set_asr_lang,
             set_target_language,
+            set_conversation_languages,
             set_quality_profile,
             set_asr_model,
             get_asr_lang,
@@ -10872,6 +11437,12 @@ fn main() {
                     *voice_model().lock().unwrap() = "hy-mt2".into();
                     *voice_quality_profile().lock().unwrap() = "fast".into();
                     std::env::set_var("MYT_ASR_LANG", default_asr_language());
+                    *voice_target_language().lock().unwrap() = default_target_language();
+                    *voice_conversation_route().lock().unwrap() = ConversationRoute {
+                        enabled: false,
+                        language_a: default_conversation_language_a(),
+                        language_b: default_conversation_language_b(),
+                    };
                     *voice_direction().lock().unwrap() = "auto".into();
                     VAD_STEADY
                         .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
@@ -10981,7 +11552,8 @@ fn main() {
                     // fallback — the frontend just mirrors the state
                     let h2 = handle.clone();
                     let _ = tauri::async_runtime::spawn(async move {
-                        match start_voice(h2.clone(), "auto".into(), "hy-mt2".into()).await {
+                        let direction = voice_direction().lock().unwrap().clone();
+                        match start_voice(h2.clone(), direction, "hy-mt2".into()).await {
                             Ok(_) => {
                                 log_line("[voice-auto] backend voice started");
                                 // auto-show the subtitle overlay so the

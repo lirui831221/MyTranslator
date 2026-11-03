@@ -27,9 +27,17 @@
   .seg { display: flex; background: var(--surface); border-radius: 10px; padding: 3px; flex: 1; }
   .seg button { flex: 1; border: 0; background: transparent; color: var(--text-2); padding: 7px 0; border-radius: 8px; font-size: 13px; cursor: pointer; transition: all .15s; }
   .seg button.active { background: var(--surface-2); color: var(--text); font-weight: 500; }
+  .seg button:disabled { opacity: .45; cursor: default; }
+  .mode-seg { flex: 0 0 210px; }
   .language-control { display: flex; align-items: center; gap: 8px; background: var(--surface); border-radius: 10px; padding: 3px 8px; min-width: 215px; }
   .language-control label { color: var(--text-2); font-size: 11px; white-space: nowrap; }
   .language-select { min-width: 0; flex: 1; border: 0; outline: none; color: var(--text); background: var(--surface-2); border-radius: 8px; padding: 7px 9px; font-size: 13px; }
+  .conversation-language-controls { display: flex; align-items: center; gap: 8px; flex: 1 1 500px; min-width: 0; }
+  .conversation-language-controls[hidden], .language-control[hidden] { display: none !important; }
+  .conversation-language-controls .language-control { flex: 1 1 0; min-width: 180px; }
+  .swap-language-btn { flex: 0 0 38px; height: 38px; border: 0; border-radius: 10px; background: var(--surface-2); color: var(--text); font-size: 17px; cursor: pointer; }
+  .swap-language-btn:hover { opacity: .82; }
+  .swap-language-btn:disabled, .language-select:disabled { opacity: .45; cursor: default; }
 
   .pane { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
   textarea { flex: 1; background: var(--surface); border: 1px solid transparent; border-radius: var(--radius); color: var(--text); padding: 16px; font-size: 15px; line-height: 1.6; resize: none; outline: none; transition: border-color .15s; }
@@ -58,6 +66,8 @@
   .column-title.translation::before { background: #30d158; }
   .history { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 2px; }
   .entry { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .entry.has-direction { row-gap: 5px; }
+  .entry-direction { grid-column: 1 / -1; color: #64d2ff; font-size: 10px; font-weight: 600; letter-spacing: .02em; padding: 0 4px; }
   .entry .src, .entry .dst { min-width: 0; padding: 12px 13px; border-radius: 10px; border: 1px solid var(--surface-2); line-height: 1.55; overflow-wrap: anywhere; }
   .entry .src { background: #242426; font-size: calc(var(--src-size, 12px)); color: #d1d1d6; }
   .entry .dst { background: #202b25; border-color: #30483a; font-size: calc(var(--dst-size, 15px)); font-weight: 500; color: var(--text); }
@@ -84,6 +94,9 @@
   .save-btn { background: var(--accent); color: white; border: 0; border-radius: 9px; padding: 9px 16px; font-weight: 600; cursor: pointer; }
   .glossary-status { color: var(--text-2); font-size: 12px; flex: 1; }
   @media (max-width: 680px) {
+    .mode-seg, .conversation-language-controls { flex-basis: 100%; }
+    .conversation-language-controls { flex-wrap: wrap; }
+    .conversation-language-controls .language-control { min-width: min(210px, 100%); }
     .column-heads { display: none; }
     .entry { grid-template-columns: 1fr; gap: 6px; }
     .entry .src::before, .entry .dst::before { display: block; margin-bottom: 4px; color: var(--text-2); font-size: 10px; font-style: normal; font-weight: 600; letter-spacing: .04em; }
@@ -99,13 +112,28 @@
   </div>
 
   <div class="controls">
-    <div class="language-control">
+    <div class="seg mode-seg" id="translationModeSeg" aria-label="翻译模式">
+      <button type="button" class="active" data-mode="single">单向翻译</button>
+      <button type="button" data-mode="conversation">双人互译</button>
+    </div>
+    <div class="language-control" id="singleAsrLanguageControl">
       <label for="asrLanguageSelect">识别语言</label>
       <select class="language-select" id="asrLanguageSelect" title="选择输入音频的语言"></select>
     </div>
-    <div class="language-control">
+    <div class="language-control" id="singleTargetLanguageControl">
       <label for="targetLanguageSelect">翻译为</label>
       <select class="language-select" id="targetLanguageSelect" title="选择译文语言"></select>
+    </div>
+    <div class="conversation-language-controls" id="conversationLanguageControls" hidden>
+      <div class="language-control">
+        <label for="conversationLanguageASelect">语言 A</label>
+        <select class="language-select" id="conversationLanguageASelect" title="第一位说话者使用的语言"></select>
+      </div>
+      <button type="button" class="swap-language-btn" id="swapConversationLanguages" title="交换语言 A 和语言 B" aria-label="交换语言 A 和语言 B">⇄</button>
+      <div class="language-control">
+        <label for="conversationLanguageBSelect">语言 B</label>
+        <select class="language-select" id="conversationLanguageBSelect" title="第二位说话者使用的语言"></select>
+      </div>
     </div>
     <div class="seg" id="qualityProfileSeg" style="flex:1.2">
       <button data-profile="fast" title="Whisper Medium＋Hy-MT2＋快断句，不启动可选后台复核">⚡ 极速</button>
@@ -181,6 +209,11 @@
   let effectiveAsrModel = 'qwen3-asr';
   let asrLanguage = 'zh';
   let targetLanguage = 'auto';
+  let translationMode = 'single';
+  let conversationLanguageA = 'zh';
+  let conversationLanguageB = 'en';
+  let conversationSettingsBusy = false;
+  const languageNames = new Map();
   let qualityProfile = 'balanced';
   let inputMode = 'microphone';
   let preferredInputMode = 'microphone';
@@ -196,6 +229,17 @@
     const options = await invoke('language_options');
     const recognitionSelect = document.getElementById('asrLanguageSelect');
     const targetSelect = document.getElementById('targetLanguageSelect');
+    const conversationASelect = document.getElementById('conversationLanguageASelect');
+    const conversationBSelect = document.getElementById('conversationLanguageBSelect');
+    const recognitionCodes = new Set(options.recognition.map(language => language.code));
+    languageNames.clear();
+    options.recognition.forEach(language =>
+      languageNames.set(language.code, language.zh_name || language.english_name || language.code));
+    options.translation.forEach(language => {
+      if (!languageNames.has(language.code)) {
+        languageNames.set(language.code, language.zh_name || language.english_name || language.code);
+      }
+    });
     recognitionSelect.replaceChildren();
     const automatic = document.createElement('option');
     automatic.value = 'auto';
@@ -223,14 +267,164 @@
       item.textContent = `${language.zh_name} · ${language.english_name}`;
       targetSelect.appendChild(item);
     });
+    const conversationLanguages = options.translation.filter(language => recognitionCodes.has(language.code));
+    conversationASelect.replaceChildren();
+    conversationBSelect.replaceChildren();
+    conversationLanguages.forEach(language => {
+      const label = `${language.zh_name} · ${language.english_name}`;
+      const itemA = document.createElement('option');
+      itemA.value = language.code;
+      itemA.textContent = label;
+      const itemB = itemA.cloneNode(true);
+      conversationASelect.appendChild(itemA);
+      conversationBSelect.appendChild(itemB);
+    });
+    const available = conversationLanguages.map(language => language.code);
+    if (!available.includes(conversationLanguageA)) {
+      conversationLanguageA = available.includes('zh') ? 'zh' : (available[0] || '');
+    }
+    if (!available.includes(conversationLanguageB) || conversationLanguageB === conversationLanguageA) {
+      conversationLanguageB = available.includes('en') && conversationLanguageA !== 'en'
+        ? 'en'
+        : (available.find(code => code !== conversationLanguageA) || '');
+    }
     recognitionSelect.value = asrLanguage;
     targetSelect.value = targetLanguage;
+    conversationASelect.value = conversationLanguageA;
+    conversationBSelect.value = conversationLanguageB;
+    refreshHistoryLanguageLabels();
+    applyTranslationModeUI();
   }
+
+  function languageDisplayName(code) {
+    if (!code) return '';
+    return languageNames.get(code) || code;
+  }
+
+  function refreshDirection() {
+    direction = translationMode === 'conversation'
+      ? 'conversation'
+      : (targetLanguage === 'auto' ? 'auto' : `to:${targetLanguage}`);
+  }
+
+  function applyTranslationModeUI() {
+    const conversation = translationMode === 'conversation';
+    document.getElementById('singleAsrLanguageControl').hidden = conversation;
+    document.getElementById('singleTargetLanguageControl').hidden = conversation;
+    document.getElementById('conversationLanguageControls').hidden = !conversation;
+    document.querySelectorAll('#translationModeSeg button').forEach(button =>
+      button.classList.toggle('active', button.dataset.mode === translationMode));
+    const input = document.getElementById('input');
+    input.placeholder = conversation
+      ? '输入语言 A 或 B 的文本，自动翻译成对方语言，⌘+Enter 翻译'
+      : '输入要翻译的文本，⌘+Enter 翻译';
+    refreshDirection();
+    updateGlossaryAvailability();
+    updateVoiceHint();
+  }
+
+  function setConversationControlsDisabled(disabled) {
+    document.querySelectorAll('#translationModeSeg button').forEach(button => button.disabled = disabled);
+    document.getElementById('asrLanguageSelect').disabled = disabled;
+    document.getElementById('targetLanguageSelect').disabled = disabled;
+    document.getElementById('conversationLanguageASelect').disabled = disabled;
+    document.getElementById('conversationLanguageBSelect').disabled = disabled;
+    document.getElementById('swapConversationLanguages').disabled = disabled;
+  }
+
+  function showLanguageSettingError(label, error, addEntry = true) {
+    const message = error instanceof Error ? error.message : String(error);
+    document.getElementById('statusText').textContent = message;
+    document.getElementById('dot').style.background = '#ff9f0a';
+    if (addEntry) addHistory(label, message, 'error');
+    setTimeout(() => {
+      const fallbackActive = preferredInputMode === 'system'
+        && inputMode === 'microphone' && Boolean(inputFallbackReason);
+      if (fallbackActive) {
+        document.getElementById('dot').style.background = '#ff9f0a';
+      } else {
+        document.getElementById('dot').style.removeProperty('background');
+      }
+    }, 3500);
+  }
+
+  async function setTranslationMode(nextMode) {
+    if (!['single', 'conversation'].includes(nextMode)
+        || nextMode === translationMode || conversationSettingsBusy) return;
+    const previousMode = translationMode;
+    conversationSettingsBusy = true;
+    setConversationControlsDisabled(true);
+    try {
+      const result = await invoke('set_conversation_languages', {
+        enabled: nextMode === 'conversation',
+        languageA: conversationLanguageA,
+        languageB: conversationLanguageB,
+      });
+      if (result?.effective_recognition_model) {
+        effectiveAsrModel = result.effective_recognition_model;
+      }
+      translationMode = nextMode;
+      applyTranslationModeUI();
+    } catch (error) {
+      translationMode = previousMode;
+      applyTranslationModeUI();
+      showLanguageSettingError('切换翻译模式失败', error);
+    } finally {
+      conversationSettingsBusy = false;
+      setConversationControlsDisabled(false);
+    }
+  }
+
+  async function setConversationPair(nextA, nextB) {
+    const selectA = document.getElementById('conversationLanguageASelect');
+    const selectB = document.getElementById('conversationLanguageBSelect');
+    if (conversationSettingsBusy) {
+      selectA.value = conversationLanguageA;
+      selectB.value = conversationLanguageB;
+      return;
+    }
+    if (!nextA || !nextB || nextA === nextB) {
+      selectA.value = conversationLanguageA;
+      selectB.value = conversationLanguageB;
+      showLanguageSettingError('语言设置', '语言 A 和语言 B 必须选择两种不同的语言', false);
+      return;
+    }
+    const previousA = conversationLanguageA;
+    const previousB = conversationLanguageB;
+    conversationSettingsBusy = true;
+    setConversationControlsDisabled(true);
+    try {
+      const result = await invoke('set_conversation_languages', {
+        enabled: true,
+        languageA: nextA,
+        languageB: nextB,
+      });
+      if (result?.effective_recognition_model) {
+        effectiveAsrModel = result.effective_recognition_model;
+      }
+      conversationLanguageA = nextA;
+      conversationLanguageB = nextB;
+      selectA.value = conversationLanguageA;
+      selectB.value = conversationLanguageB;
+      applyTranslationModeUI();
+    } catch (error) {
+      conversationLanguageA = previousA;
+      conversationLanguageB = previousB;
+      selectA.value = previousA;
+      selectB.value = previousB;
+      showLanguageSettingError('切换双人互译语言失败', error);
+    } finally {
+      conversationSettingsBusy = false;
+      setConversationControlsDisabled(false);
+    }
+  }
+
   document.getElementById('asrLanguageSelect').onchange = async event => {
     const previous = asrLanguage;
     asrLanguage = event.target.value;
     try {
       await invoke('set_asr_lang', { lang: asrLanguage });
+      updateGlossaryAvailability();
       updateVoiceHint();
     } catch (error) {
       asrLanguage = previous;
@@ -241,17 +435,27 @@
   document.getElementById('targetLanguageSelect').onchange = async event => {
     const previous = targetLanguage;
     targetLanguage = event.target.value;
-    direction = targetLanguage === 'auto' ? 'auto' : `to:${targetLanguage}`;
+    refreshDirection();
     try {
       await invoke('set_target_language', { lang: targetLanguage });
+      updateGlossaryAvailability();
       updateVoiceHint();
     } catch (error) {
       targetLanguage = previous;
-      direction = previous === 'auto' ? 'auto' : `to:${previous}`;
+      refreshDirection();
       event.target.value = previous;
       addHistory('切换翻译语言失败', String(error), 'error');
     }
   };
+  document.querySelectorAll('#translationModeSeg button').forEach(button => {
+    button.onclick = () => setTranslationMode(button.dataset.mode);
+  });
+  document.getElementById('conversationLanguageASelect').onchange = event =>
+    setConversationPair(event.target.value, conversationLanguageB);
+  document.getElementById('conversationLanguageBSelect').onchange = event =>
+    setConversationPair(conversationLanguageA, event.target.value);
+  document.getElementById('swapConversationLanguages').onclick = () =>
+    setConversationPair(conversationLanguageB, conversationLanguageA);
   document.querySelectorAll('#qualityProfileSeg button').forEach(b => {
     b.onclick = async () => {
       const previous = qualityProfile;
@@ -343,7 +547,30 @@
     rows.appendChild(row);
     if (!entry) row.querySelector('.term-zh').focus();
   }
+  function glossaryCompatible() {
+    if (translationMode === 'conversation') {
+      return new Set([conversationLanguageA, conversationLanguageB]).size === 2
+        && [conversationLanguageA, conversationLanguageB].every(code => code === 'zh' || code === 'en');
+    }
+    return ['auto', 'zh', 'en'].includes(asrLanguage)
+      && ['auto', 'zh', 'en'].includes(targetLanguage);
+  }
+  function updateGlossaryAvailability() {
+    const compatible = glossaryCompatible();
+    const button = document.getElementById('glossaryBtn');
+    button.disabled = !compatible;
+    button.textContent = compatible ? '📖 术语表' : '📖 仅中英术语';
+    button.title = compatible
+      ? '固定中英人名、机构名和技术术语的译法'
+      : '当前语言对不是中文和英文；现有术语表仅支持中英双向术语';
+    const dialog = document.getElementById('glossaryDialog');
+    if (!compatible && dialog.open) dialog.close();
+  }
   async function openGlossary() {
+    if (!glossaryCompatible()) {
+      showLanguageSettingError('术语表不可用', '术语表目前仅支持中文和英文语言对', false);
+      return;
+    }
     const dialog = document.getElementById('glossaryDialog');
     const rows = document.getElementById('glossaryRows');
     const status = document.getElementById('glossaryStatus');
@@ -404,14 +631,23 @@
       : '，明确句间停顿约 0.48 秒、模糊停顿最多 0.8 秒后翻译';
     const asrLabel = document.getElementById('asrLanguageSelect').selectedOptions[0]?.textContent || asrLanguage;
     const targetLabel = document.getElementById('targetLanguageSelect').selectedOptions[0]?.textContent || targetLanguage;
-    const recognition = effectiveAsrModel === 'qwen3-asr'
-      ? `；${asrLabel}，Qwen3-ASR 最终识别，Whisper 实时预览`
-      : `；${asrLabel}，Whisper Medium 最终识别`;
     const profileName = qualityProfile === 'fast' ? '极速'
       : (qualityProfile === 'quality' ? '高质量' : '均衡');
     const review = qualityProfile === 'fast'
       ? '；Hy-MT2 直接首译'
       : '；Hy-MT2 首译，Qwen3.5 按需后台复核';
+    if (translationMode === 'conversation') {
+      const pair = `${languageDisplayName(conversationLanguageA)} ⇄ ${languageDisplayName(conversationLanguageB)}`;
+      const recognition = effectiveAsrModel === 'qwen3-asr'
+        ? 'Qwen3-ASR 最终识别，Whisper 实时预览'
+        : 'Whisper Medium 最终识别';
+      document.getElementById('voiceHint').textContent =
+        `${profileName}模式：${source}${ending}；双人互译 ${pair}，自动判断当前说话语言并翻译成对方语言；${recognition}${review}`;
+      return;
+    }
+    const recognition = effectiveAsrModel === 'qwen3-asr'
+      ? `；${asrLabel}，Qwen3-ASR 最终识别，Whisper 实时预览`
+      : `；${asrLabel}，Whisper Medium 最终识别`;
     document.getElementById('voiceHint').textContent =
       `${profileName}模式：` + source + ending + recognition + `；翻译为 ${targetLabel}` + review;
   }
@@ -491,7 +727,36 @@
     document.getElementById('livePane').style.display = 'flex';
     document.getElementById('textPane').style.display = 'none';
   }
-  function addHistory(source, translation, state = '', fragmentId = null) {
+  function setEntryLanguages(entry, sourceLanguage, targetLanguage) {
+    if (!entry) return;
+    if (sourceLanguage && sourceLanguage !== 'auto' && sourceLanguage !== 'und') {
+      entry.dataset.sourceLanguage = sourceLanguage;
+    }
+    if (targetLanguage && targetLanguage !== 'auto' && targetLanguage !== 'und') {
+      entry.dataset.targetLanguage = targetLanguage;
+    }
+    const source = entry.dataset.sourceLanguage || '';
+    const target = entry.dataset.targetLanguage || '';
+    let badge = entry.querySelector('.entry-direction');
+    if (!source || !target) {
+      badge?.remove();
+      entry.classList.remove('has-direction');
+      return;
+    }
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'entry-direction';
+      entry.prepend(badge);
+    }
+    badge.textContent = `${languageDisplayName(source)} → ${languageDisplayName(target)}`;
+    entry.classList.add('has-direction');
+  }
+  function refreshHistoryLanguageLabels() {
+    document.querySelectorAll('#historyList .entry').forEach(entry =>
+      setEntryLanguages(entry, entry.dataset.sourceLanguage, entry.dataset.targetLanguage));
+  }
+  function addHistory(
+    source, translation, state = '', fragmentId = null, sourceLanguage = '', targetLanguage = '') {
     const list = document.getElementById('historyList');
     const div = document.createElement('div');
     div.className = 'entry' + (state ? ` ${state}` : '');
@@ -507,6 +772,7 @@
     dst.className = 'dst';
     dst.textContent = translation;
     div.appendChild(src); div.appendChild(dst);
+    setEntryLanguages(div, sourceLanguage, targetLanguage);
     list.prepend(div);
     // keep the log bounded
     while (list.children.length > 200) list.lastElementChild.remove();
@@ -533,7 +799,8 @@
     return [...document.querySelectorAll(selector)]
       .find(item => entryFragmentIds(item).some(id => ids.has(id))) || null;
   }
-  function mergePendingEntries(source, fragmentIds = [], batchId = 0, revision = 0) {
+  function mergePendingEntries(
+    source, fragmentIds = [], batchId = 0, revision = 0, sourceLanguage = '', targetLanguage = '') {
     const ids = fragmentIds.map(String);
     if (!ids.length) return null;
     const entries = [...document.querySelectorAll('#historyList .entry.pending')];
@@ -547,6 +814,7 @@
     target.dataset.batchId = String(batchId || 0);
     target.dataset.revision = String(revision || 0);
     matched.forEach(item => { if (item !== target) item.remove(); });
+    setEntryLanguages(target, sourceLanguage, targetLanguage);
     return target;
   }
   function cancelPendingEntries(fragmentIds = []) {
@@ -555,12 +823,14 @@
       if (entryFragmentIds(item).some(id => ids.includes(id))) item.remove();
     });
   }
-  function finishPendingEntry(source, translation, fragmentIds = [], batchId = 0, revision = 0) {
+  function finishPendingEntry(
+    source, translation, fragmentIds = [], batchId = 0, revision = 0,
+    sourceLanguage = '', targetLanguage = '') {
     const entry = findEntryByFragments(fragmentIds)
       || [...document.querySelectorAll('#historyList .entry.pending')]
         .find(item => item.querySelector('.src')?.textContent === source);
     if (!entry) {
-      const added = addHistory(source, translation);
+      const added = addHistory(source, translation, '', null, sourceLanguage, targetLanguage);
       added.dataset.fragmentIds = fragmentIds.map(String).join(',');
       added.dataset.batchId = String(batchId || 0);
       added.dataset.revision = String(revision || 0);
@@ -574,8 +844,11 @@
     entry.dataset.fragmentIds = fragmentIds.map(String).join(',') || entry.dataset.fragmentIds;
     entry.dataset.batchId = String(batchId || entry.dataset.batchId || 0);
     entry.dataset.revision = String(revision || 0);
+    setEntryLanguages(entry, sourceLanguage, targetLanguage);
   }
-  function reviseHistoryEntry(source, fragmentIds = [], batchId = 0, revision = 1) {
+  function reviseHistoryEntry(
+    source, fragmentIds = [], batchId = 0, revision = 1,
+    sourceLanguage = '', targetLanguage = '') {
     const entry = findEntryByFragments(fragmentIds);
     if (!entry) return;
     const currentRevision = Number(entry.dataset.revision || 0);
@@ -586,6 +859,7 @@
     entry.dataset.fragmentIds = fragmentIds.map(String).join(',') || entry.dataset.fragmentIds;
     entry.dataset.batchId = String(batchId || entry.dataset.batchId || 0);
     entry.dataset.revision = String(revision || 1);
+    setEntryLanguages(entry, sourceLanguage, targetLanguage);
   }
   function clearHistory() {
     document.getElementById('historyList').innerHTML = '';
@@ -612,7 +886,10 @@
     const text = typeof payload === 'string' ? payload : (payload.source ?? '');
     const fragmentId = typeof payload === 'string' ? null : payload.id;
     removePartialEntry();
-    addHistory(text, '翻译中…', 'pending', fragmentId);
+    addHistory(
+      text, '翻译中…', 'pending', fragmentId,
+      typeof payload === 'string' ? '' : (payload.source_language ?? ''),
+      typeof payload === 'string' ? '' : (payload.target_language ?? ''));
   });
   // streaming preview while speaking (top entry, grey, replaced on final)
   listen('voice-partial', e => {
@@ -625,13 +902,15 @@
     showLive();
     const p = eventPayload(e) ?? {};
     mergePendingEntries(
-      p.source ?? '', p.fragment_ids ?? [], p.batch_id ?? 0, p.revision ?? 0);
+      p.source ?? '', p.fragment_ids ?? [], p.batch_id ?? 0, p.revision ?? 0,
+      p.source_language ?? '', p.target_language ?? '');
   });
   listen('voice-asr-revised', e => {
     showLive();
     const p = eventPayload(e) ?? {};
     reviseHistoryEntry(
-      p.source ?? '', p.fragment_ids ?? [], p.batch_id ?? 0, p.revision ?? 1);
+      p.source ?? '', p.fragment_ids ?? [], p.batch_id ?? 0, p.revision ?? 1,
+      p.source_language ?? '', p.target_language ?? '');
   });
   listen('voice-semantic-cancelled', e => {
     const p = eventPayload(e) ?? {};
@@ -642,7 +921,8 @@
     const p = eventPayload(e) ?? {};
     finishPendingEntry(
       p.source ?? '', p.translation ?? '', p.fragment_ids ?? [],
-      p.batch_id ?? p.sequence ?? 0, p.revision ?? 0);
+      p.batch_id ?? p.sequence ?? 0, p.revision ?? 0,
+      p.source_language ?? '', p.target_language ?? '');
   });
   listen('voice-error', e => {
     const p = eventPayload(e);
@@ -684,9 +964,40 @@
       }
       if (s && s.target_language) {
         targetLanguage = s.target_language;
-        direction = s.direction || (targetLanguage === 'auto' ? 'auto' : `to:${targetLanguage}`);
         const select = document.getElementById('targetLanguageSelect');
         if ([...select.options].some(option => option.value === targetLanguage)) select.value = targetLanguage;
+      }
+      if (s && !conversationSettingsBusy) {
+        let restoredMode = null;
+        if (typeof s.translation_mode === 'string') {
+          restoredMode = ['conversation', 'bidirectional', 'two_person'].includes(s.translation_mode)
+            ? 'conversation'
+            : 'single';
+        } else if (typeof s.conversation_enabled === 'boolean') {
+          restoredMode = s.conversation_enabled ? 'conversation' : 'single';
+        } else if (typeof s.conversation_mode === 'boolean') {
+          restoredMode = s.conversation_mode ? 'conversation' : 'single';
+        } else if (s.direction === 'conversation') {
+          restoredMode = 'conversation';
+        }
+        if (restoredMode) translationMode = restoredMode;
+
+        const restoredA = s.conversation_language_a
+          ?? s.language_a ?? s.conversation?.language_a;
+        const restoredB = s.conversation_language_b
+          ?? s.language_b ?? s.conversation?.language_b;
+        const selectA = document.getElementById('conversationLanguageASelect');
+        const selectB = document.getElementById('conversationLanguageBSelect');
+        const validA = restoredA
+          && [...selectA.options].some(option => option.value === restoredA);
+        const validB = restoredB
+          && [...selectB.options].some(option => option.value === restoredB);
+        if (validA && validB && restoredA !== restoredB) {
+          conversationLanguageA = restoredA;
+          conversationLanguageB = restoredB;
+          selectA.value = conversationLanguageA;
+          selectB.value = conversationLanguageB;
+        }
       }
       if (s && s.quality_profile) {
         qualityProfile = s.quality_profile;
@@ -707,7 +1018,7 @@
       if (s && s.vad_mode) {
         vadMode = s.vad_mode;
       }
-      updateVoiceHint();
+      applyTranslationModeUI();
       if (s && s.quality_metrics) {
         const q = s.quality_metrics;
         const parts = [];

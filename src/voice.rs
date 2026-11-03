@@ -173,6 +173,7 @@ impl VadWatchdog {
 /// - emits a WAV (16 kHz mono s16le) path per utterance
 pub struct VoicePipeline {
     pub running: Arc<AtomicBool>,
+    reset_generation: Arc<AtomicU64>,
 }
 
 /// A medium-model recognition checkpoint. Rolling checkpoints keep the
@@ -212,6 +213,7 @@ impl SegmentEndReason {
 struct VoiceChunkMetadata {
     utterance_id: u64,
     speaker_turn_id: u64,
+    reset_generation: u64,
     is_final: bool,
     end_reason: SegmentEndReason,
     speaker_boundary_before: bool,
@@ -222,7 +224,15 @@ impl VoicePipeline {
     pub fn new() -> Self {
         VoicePipeline {
             running: Arc::new(AtomicBool::new(false)),
+            reset_generation: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Discard any in-progress utterance after a language, mode, or input
+    /// routing change. The capture thread observes this generation without
+    /// blocking the UI command that requested the reset.
+    pub fn request_state_reset(&self) {
+        self.reset_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Run the selected audio capture loop. Calls `on_segment(chunk)` for rolling
@@ -235,6 +245,8 @@ impl VoicePipeline {
         P: Fn(VoiceChunk) + Send + 'static,
     {
         let running = self.running.clone();
+        let reset_generation = self.reset_generation.clone();
+        let mut observed_reset_generation = reset_generation.load(Ordering::Acquire);
         let input_mode = crate::voice_input_mode();
         let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
         let mut microphone_stream: Option<cpal::Stream> = None;
@@ -451,6 +463,44 @@ impl VoicePipeline {
 
         let mut source_error: Option<String> = None;
         while running.load(Ordering::Relaxed) {
+            let requested_reset_generation = reset_generation.load(Ordering::Acquire);
+            if requested_reset_generation != observed_reset_generation {
+                observed_reset_generation = requested_reset_generation;
+                while rx.try_recv().is_ok() {}
+                segment.clear();
+                pre_roll.clear();
+                in_speech = false;
+                crate::set_voice_activity(false);
+                above_th_frames = 0;
+                silence_ms = 0.0;
+                strong_silence_ms = 0.0;
+                endpoint_candidate_ms = None;
+                pause_start_sample = None;
+                speaker_turn_probe = None;
+                cross_segment_probe = None;
+                previous_natural_signature = None;
+                previous_natural_segment_seen = false;
+                preserve_speaker_turn_across_rolling_boundary = false;
+                current_speaker_boundary_before = false;
+                speaker_change_cooldown_ms = 0.0;
+                speech_elapsed_ms = 0.0;
+                voiced_ms = 0.0;
+                peak_rms = 0.0;
+                next_partial_ms = 550.0;
+                next_checkpoint_ms = 1_800.0;
+                neural_native_buffer.clear();
+                neural_probability = None;
+                noise_floor = 0.006;
+                speaker_turn_id = next_speaker_turn_id(speaker_turn_id);
+                vad_watchdog.clear_signal();
+                if let Some(vad) = neural_vad.as_mut() {
+                    vad.reset();
+                }
+                crate::log_line(
+                    "[voice] reset VAD, speaker profile, and pending audio after routing change",
+                );
+                continue;
+            }
             // Short conversational replies can close more aggressively. Long
             // or pause-heavy speech keeps the proven 420 ms budget so a brief
             // thinking pause does not fragment the sentence.
@@ -818,6 +868,7 @@ impl VoicePipeline {
                                     VoiceChunkMetadata {
                                         utterance_id,
                                         speaker_turn_id,
+                                        reset_generation: observed_reset_generation,
                                         is_final: true,
                                         end_reason: SegmentEndReason::SpeakerChange,
                                         speaker_boundary_before: current_speaker_boundary_before,
@@ -880,6 +931,7 @@ impl VoicePipeline {
                             VoiceChunkMetadata {
                                 utterance_id,
                                 speaker_turn_id,
+                                reset_generation: observed_reset_generation,
                                 is_final: false,
                                 end_reason: SegmentEndReason::Ongoing,
                                 speaker_boundary_before: current_speaker_boundary_before,
@@ -902,6 +954,7 @@ impl VoicePipeline {
                             VoiceChunkMetadata {
                                 utterance_id,
                                 speaker_turn_id,
+                                reset_generation: observed_reset_generation,
                                 is_final: false,
                                 end_reason: SegmentEndReason::Ongoing,
                                 speaker_boundary_before: current_speaker_boundary_before,
@@ -1023,6 +1076,7 @@ impl VoicePipeline {
                             VoiceChunkMetadata {
                                 utterance_id,
                                 speaker_turn_id,
+                                reset_generation: observed_reset_generation,
                                 is_final: true,
                                 end_reason: if ended_by_strong_silence {
                                     SegmentEndReason::StrongSilence
@@ -1148,6 +1202,11 @@ impl VoicePipeline {
         F: Fn(VoiceChunk),
     {
         self.flush_with(segment, sample_rate, &|wav_path| {
+            if self.reset_generation.load(Ordering::Acquire) != metadata.reset_generation {
+                let _ = std::fs::remove_file(&wav_path);
+                crate::log_line("[voice] dropped audio emitted during a routing reset");
+                return;
+            }
             on_segment(VoiceChunk {
                 wav_path,
                 utterance_id: metadata.utterance_id,
